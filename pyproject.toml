@@ -1,0 +1,25 @@
+[project]
+name = "workspace"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "qingluo", email = "qingluo@chipltech.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "cmake==3.26.1",
+    "pip>=26.2.1",
+    "pybind11>=3.1.0",
+    "pyyaml>=6.0.3",
+    "setuptools>=84.0.0",
+    "setuptools-scm>=10.3.4",
+    "typing-extensions>=4.16.0",
+]
+
+[project.scripts]
+workspace = "workspace:main"
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
