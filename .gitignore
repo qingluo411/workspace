@@ -8,3 +8,14 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Independently managed nested repositories
+/LLVM/
+/DLCsim/
+/DLCSynapse/
+/DLC_Custom_Kernel/
+/DLC_CL/
+/pytorch/
+/vllm/
+/vllm-cl/
+/sites/fp8-kv-review/

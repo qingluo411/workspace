@@ -334,6 +334,21 @@ for repo in "${REPOS[@]}"; do
     fi
     printf '  HEAD: %s\n' "$head_info"
 
+    local_branches=()
+    while IFS= read -r local_branch; do
+        [[ -n $local_branch ]] || continue
+        if ((!detached)) && [[ $local_branch == "$branch_display" ]]; then
+            local_branches+=("${C_GREEN}* ${local_branch}${C_RESET}")
+        else
+            local_branches+=("$local_branch")
+        fi
+    done < <(git -C "$repo" for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null | LC_ALL=C sort)
+    if ((${#local_branches[@]} > 0)); then
+        printf '  本地分支 (%d): %s\n' "${#local_branches[@]}" "${local_branches[*]}"
+    else
+        printf '  本地分支: %b无%b\n' "$C_DIM" "$C_RESET"
+    fi
+
     if [[ -n $remote && -n $default_branch && -n $new_remote_tip ]]; then
         remote_info=$(git -C "$repo" log -1 --format='%h %cs %s' "$remote_ref" 2>/dev/null || true)
         if [[ $remote_update_note == '本轮获取到新提交'* ]]; then
