@@ -9,11 +9,13 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "cmake==3.26.1",
+    "numpy==1.26.4",
     "pip>=26.2.1",
     "pybind11>=3.1.0",
     "pyyaml>=6.0.3",
     "setuptools>=84.0.0",
     "setuptools-scm>=10.3.4",
+    "transformers==5.18",
     "typing-extensions>=4.16.0",
 ]
 
