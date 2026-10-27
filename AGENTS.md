@@ -3,7 +3,9 @@
 > 本文档用于快速回忆本仓库群（`/root/workspace`）的全貌：芯片、分层架构、
 > 各仓库职责、构建顺序、运行时调用链与当前环境状态。
 >
-> 最后更新依据：仓库 HEAD 见下表；环境为 8 卡 TYD 真机 + 本地 LLVM 工具链。
+> 最后更新：2026-10-27。当前重点是 **GLM-5.3-Flash-Mix** 的
+> `release-glm53flash` 发布线；仓库 HEAD、驱动、发布结论和文档入口见下表与第 7/8 节。
+> 面向人阅读的项目总览见根目录 `README.md`。
 
 ---
 
@@ -25,7 +27,7 @@ PyTorch 以 `device='dlc'` 接入 → vLLM 通过硬件插件跑推理。
 | 卡数量 | 8 张，`/dev/cltech0..7`（主设备号 508） |
 | sysfs | `/sys/devices/virtual/chipltech/cltech0..7` |
 | 内核驱动 | `chipltech.ko`（已加载；路径 `/work/chipltech.ko`，由 `DLCKERNELDRIVER_PATH=/work/` 指向；源码不在 workspace） |
-| 驱动版本 | `Driver Version_v23.0.1`，`Api_Version_23` |
+| 驱动版本 | `Driver Version_v26.0.1`，`Api_Version_26`（GLM-5.3-Flash 发布验证组合） |
 | 固件 | `bluejay/build/dlc_init/bluejay_nrz.fw.1.2.28.bin` + HBM 训练序列等 |
 | PCI | `0000:d5:00.0` |
 
@@ -85,18 +87,23 @@ PyTorch 以 `device='dlc'` 接入 → vLLM 通过硬件插件跑推理。
 
 ## 3. 各仓库职责、产物与 HEAD
 
-| 仓库 | 职责 | 产物 / 安装位置 | HEAD |
+| 仓库 | 分支 | HEAD | 职责 / 当前状态 |
 |---|---|---|---|
-| **LLVM** | DLC TPU 编译器后端（`--target=dlc`，`-mcpu=dlc-gen2`，`-std=dc99`，注册 target 名 `dlc`） | `build/bin/{clang,ld.lld,llvm-mc,llvm-objcopy,elf2hex}` | `2fb2abd9` |
-| **DLCsim** | 指令级模拟器 + **CRT 固件**（`lib-rt/crt0.S` 等） | `/usr/local/chipltech/simulator/lib/{libsimulator.so,libserver.so,dlc_crt*.hex,dlc_crt.rtabi}` | `5bfa8963` |
-| **DLCSynapse** | Synapse 运行时核心（图、流、内存、kernel DB、profiler、用户态驱动） | `/usr/local/chipltech/synapse/lib/{libsynapse_core.so,libsynapse_backend.so,libdlc_runtime.so,libhl-thunk.so}` | `370fb6f8` |
-| **DLC_Custom_Kernel** | 2686 个 AOT kernel（`dlc_kernels/*.{c,cpp}`） | `libcustom_dlc_perf_lib.so`（**约 1.4 GB**，kernel 以 blob 内嵌） | `b0d8998` |
-| **DLC_CL** | 集合通信（DLCCL） | `/usr/local/chipltech/dlccl/lib/libdlccl.so` | `c4b2968` |
-| **pytorch** | `device='dlc'` 后端 | editable 安装，`torch.dlc.*` | `6ab64d7a` |
-| **vllm** / **vllm-cl** | 推理服务 + DLC hardware plugin | editable 安装 | `a0757668` / `d6e7a0b` |
+| **LLVM** | `main` | `2fb2abd9e629` | DLC TPU 编译器后端（`--target=dlc`、`-mcpu=dlc-gen2`、`-std=dc99`） |
+| **DLCsim** | `main` | `c6e2808d` | 指令级模拟器 + CRT；`lib-rt/*.hex` 为本地 TYD 生成改动，未提交 |
+| **DLCSynapse** | `main` | `37d6c60d` | Synapse 运行时、Graph、内存、profiler、用户态驱动 |
+| **DLC_Custom_Kernel** | `release-glm53flash` | `795e8ca3a` | AOT kernel 库；包含 GLM 融合算子与 KDA 地址溢出修复 |
+| **DLC_CL** | `main` | `b4e3423` | DLCCL 集合通信 |
+| **pytorch** | `release-glm53flash` | `2ff2142cb9` | `device='dlc'` 后端；包含 block 校验修复 |
+| **vllm** | `release-glm53flash` | `8cfd356105` | vLLM DLC fork；KDA graph padding 修正 |
+| **vllm-cl** | `release-glm53flash` | `253bd69` | GLM 模型、算子、KV cache、Graph patch 主实现；工作区仅 `vllm_cl/_version.py` 为生成式改动 |
 
 > 所有仓库 remote 均为 `git@github.com:ChipLTech/<repo>.git`。
-> 注意：`DLC_Custom_Kernel`/`pytorch`/`vllm` 当前在 `test-glm53flash` / `feat/glm5-flash-native-bringup` 等特性分支。
+> `torchaudio-2.5/`、`torchvision/` 为 DLC 媒体依赖源码，发布 wheel 已在
+> `wheelhouse-glm53flash/`；不要用 PyPI 的 CUDA 版覆盖。
+>
+> `release-glm53flash` 是当前唯一交付线；早期 bring-up 特性分支只作历史参考。
+> 新修复继续提交到 release 分支，模型文档继续归档在 `work-docs/glm53flash`。
 
 ### 官方依赖图（`DLC_Custom_Kernel/README.md`）
 
@@ -107,24 +114,59 @@ LLVM ──┬─→ DLCsim ──┬─→ DLCSynapse ──┬─→ DLC_Custo
 DLC-Kernel-Driver ─────────────────→ DLCSynapse              ┘
 ```
 
-`/root/workspace/update.sh` 就是按此顺序串起来的一键构建脚本。
+`helper/compile.sh` 按此顺序构建并 editable 安装；`helper/update.sh` 会先
+`git restore/clean` 再 `git pull origin main`，不要在带发布改动的 release 分支上
+无检查执行。
 
 ---
 
 ## 4. 构建顺序与产物布局
 
-### 4.1 一键脚本 `update.sh`
+### 4.1 构建脚本
 
 ```bash
-cd LLVM            && ./build.sh
-cd DLCsim          && ./build.sh
-cd DLCSynapse      && ./compile.sh
-cd DLC_Custom_Kernel && ./build.sh
-cd DLC_CL          && ./build.sh
-cd pytorch         && rm -rf build/* dist/* && USE_CUDA=0 python3 setup.py clean
-                      PYTORCH_BUILD_VERSION=2.5.0 PYTORCH_BUILD_NUMBER=0 \
-                      USE_CUDA=0 DEBUG=0 python3 setup.py develop
+bash /root/workspace/helper/compile.sh   # 全栈源码构建 + pytorch develop + editable vllm/vllm-cl
+bash /root/workspace/helper/check_status.sh
 ```
+
+- `helper/compile.sh`：日常源码重建入口。
+- `helper/update.sh`：拉取各仓库 `main` 的辅助脚本；会清理工作区，不适合 release
+  分支直接执行。
+- `helper/get_package.sh`：打包 recipe，需调用者提供 `DLC_INC`、`PY`、
+  `WHEELHOUSE` 等变量；执行前检查复制路径。
+- `wheelhouse/`：torch/vLLM/vllm-cl 和 `libcustom_dlc_perf_lib.so`。
+- `wheelhouse-glm53flash/`：`torchaudio-2.5.0+dlc`、`torchvision-0.19.0+dlc`。
+
+单独重建 wheel 时，统一把 `/root/workspace/.venv/bin` 放到 `PATH` 前部，并显式指定
+`--dist-dir`：
+
+```bash
+export PATH=/root/workspace/.venv/bin:$PATH
+export WH=/root/workspace/wheelhouse
+mkdir -p "$WH"
+
+cd /root/workspace/pytorch
+rm -rf build/* dist/* && USE_CUDA=0 python setup.py clean
+PYTORCH_BUILD_VERSION=2.5.0 PYTORCH_BUILD_NUMBER=0 USE_CUDA=0 DEBUG=0 \
+  python setup.py bdist_wheel --dist-dir "$WH"
+
+cd /root/workspace/vllm
+rm -rf build/* dist/* && python setup.py clean
+VLLM_TARGET_DEVICE=empty VLLM_VERSION_OVERRIDE='0.30.1rc0+dlc' \
+VLLM_SKIP_VERSION_SUFFIX=1 MAX_JOBS=$(nproc) \
+  python setup.py bdist_wheel --dist-dir "$WH"
+
+cd /root/workspace/vllm-cl
+rm -rf build/* dist/* && python setup.py clean
+SETUPTOOLS_SCM_PRETEND_VERSION='0.30.1rc0+dlc' MAX_JOBS=$(nproc) \
+CMAKE_BUILD_TYPE=Release COMPILE_CUSTOM_KERNELS=1 \
+  python setup.py bdist_wheel --dist-dir "$WH"
+```
+
+`torchaudio`/`torchvision` 另用 `WH=/root/workspace/wheelhouse-glm53flash`、
+`DLC_INC=/usr/local/chipltech/synapse/include/external_includes`，完整环境变量见
+`helper/get_package.sh`。搬机时别忘了单独复制
+`libcustom_dlc_perf_lib.so` 到 `/usr/local/chipltech/synapse/lib`。
 
 ### 4.2 安装前缀
 
@@ -244,36 +286,149 @@ torch.ones(5, device='dlc')
 | `DLC_SYN_USE_SIM` | `1` → 用 DLCsim 而非真机（隐含 `DLC_SYN_BLOCKING=1`） |
 | `DLC_SYN_BLOCKING` | 阻塞所有 `dlc_runtime_api` 调用 |
 | `DLC_SYN_DEBUG` / `DLC_SYN_VERBOSE` | 日志；`VERBOSE=3` 打印算子参数 |
-| `DLC_SKIP_VERSION_CHECK` | 跳过版本校验 |
+| `DLC_SKIP_VERSION_CHECK` | 生产必须为 `0`；仅隔离旧镜像临时设为 `1` |
+| `DLC_SYN_GRAPH_CACHE` | `1` = 缓存 graph replay 的 kernel queue batch；默认 `0`，不是 graph capture 开关 |
+| `VLLM_PLUGINS` | GLM 生产必须为 `dlc,dlc_patches` |
+| `VLLM_USE_DLC_COL_MAJOR_MATMUL` | `1` = 使用适配 checkpoint 的 column-major linear 路径 |
+| `PYTORCH_DLC_ALLOC_CONF` | `expandable_segments:True`；缓解 Mamba/MLA 交错分配碎片 |
+| `VLLM_LOGGING_LEVEL` | 生产默认 `INFO`，避免 DEBUG 日志淹没 |
 | `DLC_SIM_ENHANCED_*` / `DLC_SIM_ENABLE_*` | 模拟器各类调试打印（见 `DLCsim/setenv.sh` 全表） |
 
 > 注意：`.bashrc` 与 `/etc/environment` 不一致会导致交互/非交互行为不同。
 
 ---
 
-## 7. 当前环境状态（2026-10 记录）
+## 7. 当前环境状态（2026-10-27）
 
-| 组件 | 源码构建 | 已安装 | 状态 |
-|---|---|---|---|
-| LLVM | ✅ | — | 完成 |
-| DLCsim | ✅ | ✅ | 完成（hex 已是 `0TYD`；`lib-rt/*.hex` 在 git 中为 modified，未提交） |
-| DLCSynapse | ✅ | ✅ | 完成 |
-| DLC_Custom_Kernel | ✅ | ✅ | 完成（1.4GB `.so`） |
-| DLC_CL | ✅ | ✅ | 完成 |
-| pytorch | ⚠️ `build/lib/` 有 `libtorch_cpu.so`/`libtorch_dlc.so`/`libtorch_global_deps.so`，但 `torch/lib/` 空、无 `torch/_C.so` | — | **未收尾** |
+| 组件 | 状态 |
+|---|---|
+| LLVM / DLCsim / DLCSynapse / DLC_CL | 已构建并安装；DLCsim CRT 为 TYD |
+| DLC_Custom_Kernel | 已构建并安装，`libcustom_dlc_perf_lib.so` 约 1.4 GB |
+| pytorch | 已 editable 安装；`import torch` 正常，`torch 2.5.0`，DLC 后端可用 |
+| vLLM / vllm-cl | editable 源码安装；交付 wheel 版本 `0.30.1rc0+dlc`，V1 runner |
+| torchaudio / torchvision | 当前 editable 源码模块版本 `2.5.0+dlc` / `0.19.0+dlc`；交付 wheel 同版本 |
+| 驱动 | `Driver Version_v26.0.1`、`Api_Version_26` |
+| 服务 | 当前未运行，`18005` 空闲 |
 
-- 当前 `import torch` 失败：
-  ```
-  OSError: /root/workspace/pytorch/torch/lib/libtorch_global_deps.so: cannot open shared object file
-  ```
-  原因：`setup.py develop` 编译已完成，但把 `build/lib/*.so` 落到 `torch/lib/` 并生成 `_C.so` 的收尾步骤未走完。
-- 修复动作：重跑 `update.sh` 最后一段（`USE_CUDA=0 DEBUG=0 python3 setup.py develop`）。
-- 真机 `device_init_flag` 为 `0x30000FF`（bit6/bit7 已置位 = CRT 已加载校验通过）。
-- Python 环境：`/root/workspace/.venv`，Python 3.10.12，torch / vllm / vllm-cl 均为 editable 安装。
+- Python 环境：`/root/workspace/.venv`，Python 3.10。
+- 真机 8 卡 `/dev/cltech0..7` 可见；`device_init_flag` 正常。
+- `torch.dlc.is_available()` 为 `True`。
+- 按使用指南的 `setsid` 方式启动时，服务日志默认在
+  `/root/workspace/log/glm5_service.log`；前台启动则直接输出到终端。
+- editable 安装的 dist metadata 会显示源码开发版本（如 vLLM `0.2.8.dev...empty`、
+  vllm-cl `0.1.dev...`、torchaudio `2.5.0a0...`），不是交付 wheel 版本；判断部署
+  版本应看 wheel 文件名、`direct_url.json` 或模块版本文件。
+- 本机没有可用 Triton driver；vLLM 会提示 V2 runner 不可用并回落 V1，这是当前预期。
+- 本地生成改动：`DLCsim/lib-rt/*.hex`、`vllm-cl/vllm_cl/_version.py`；提交前应确认是否需要纳入。
 
 ---
 
-## 8. 常见问题排查入口
+## 8. GLM-5.3-Flash 发布状态（2026-10-27）
+
+### 8.1 模型与生产路径
+
+- 模型：`/data/models/GLM-5.3-Flash-Mix`，`glm5_next`，45 层、hidden 4096。
+- 34 个 KDA linear-attention 层；11 个 sparse MLA 层（3, 7, 11, …, 43）。
+- `index_kpool=4`、`index_topk=2048`、`index_n_heads=32`。
+- checkpoint 约 178.81 GiB、120 分片；TP=8 每 rank 加载约 21.55 GiB。
+- 实际生产 runner 为 V1；prefill/chunked prefill 为 eager，decode 使用
+  `FULL_DECODE_ONLY` graph。
+
+已进入生产路径的 GLM 代码：
+
+- GLM5Next 模型/indexer/sparse MLA/权重映射 patch。
+- `silu_and_mul_with_clamp`、`mhc_pre/post`、KDA RMSNorm sigmoid gate。
+- KDA causal conv、chunk prefill、recurrent decode、state gather/scatter。
+- KPool `#07` append+compress、`#09` select/top-k/expand、`#19` slot mapping。
+- DLC 专用 KV cache 分组、Mamba/KDA state pool、metadata H2D 合并、graph padding。
+- `DLC_SYN_GRAPH_CACHE=1` 的 cached replay、KPool 持久 graph buffer。
+
+### 8.2 启动基线
+
+```bash
+export VLLM_PLUGINS=dlc,dlc_patches
+export DLC_SKIP_VERSION_CHECK=0
+export DLC_SYN_GRAPH_CACHE=1
+export VLLM_USE_DLC_COL_MAJOR_MATMUL=1
+export PYTORCH_DLC_ALLOC_CONF=expandable_segments:True
+
+vllm serve /data/models/GLM-5.3-Flash-Mix \
+  --served-model-name GLM-5.3-Flash-Mix --language-model-only --dtype bfloat16 \
+  --max-model-len 4096 --max-num-batched-tokens 4096 --max-num-seqs 64 \
+  --block-size 256 --tensor-parallel-size 8 --gpu-memory-utilization 0.80 \
+  --trust-remote-code --port 18005 \
+  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+  --kernel-config '{"enable_jit_warmup": false}'
+```
+
+冷启动约 3–4 分钟。启动日志应出现 `Application startup complete`、graph capture、
+KV cache 容量和 `FULL_DECODE_ONLY`。
+
+### 8.3 验证与性能摘要
+
+- 健康检查、单请求、8 并发、16K/32K chunked prefill、prefill→decode 边界通过。
+- 1/2/8/16/24/32 并发 graph 全部成功；graph 与 eager 同输入逐字一致。
+- smoke：单请求 20/32 为 2.107 s；8 并发 20/32 为 3.751 s、约 68.24 tok/s；
+  3610-token prompt 为 72.419 s。
+- Graph vs eager：单请求 decode gap `110.27 → 67.64 ms`；8 并发吞吐 +9%；
+  32 并发持平；64 并发因 `38 → 40` bucket padding 回退约 5%。
+- Graph replay cache=1 vs 0：单并发 decode gap 再降约 9%–10%，TTFT <1% 变化。
+- 生产配置单并发 decode 约 15–17.5 tok/s；长 prompt 端到端受 prefill 支配。
+- 历史干净 decode 约 96.9 ms/token；残余大项是集合通信 root-critical 等待。
+- vllm-cl 定向测试：`161 passed, 10 subtests passed`；compileall/ruff/diff-check 通过。
+
+### 8.4 上下文长度
+
+- 模型声明上限：1,048,576。
+- 单请求 KV block：`69 + 2 × ceil(L / 256)`；69 = 34 个 KDA 层 × 2 个 state block
+  + 1 个 KPool tail block。
+- 0.80 显存利用率：1,411 blocks，理论上限 **171,776（约 171K）**，满长并发 1.00x。
+- 0.95 显存利用率：约 1,883–1,891 blocks，理论 **约 232K，最高约 233K**；风险高，
+  未作为生产配置。
+- 常规验证值为 4096；131072 曾在 0.85/eager 下完成长上下文验证。长上下文 prefill
+  会近似线性变慢。
+
+### 8.5 已知限制
+
+- 无 Triton，V2 runner 不可用；V1 是当前生产路径。
+- Graph 只覆盖 decode；64 并发及非 2 次幂并发存在 bucket padding 成本。
+- KPool `#09` 在长 prefill/长上下文 decode 上慢于 native；交叉点约为 prefill
+  180 token、单请求 decode 448 token、32 请求 decode 800 token/请求。最终决策是
+  不按形状设门禁，prefill/decode 统一走 `#07 + #09`。
+- 硬件不支持计算/通信重叠；集合通信等待仍是主要优化空间。
+- AWQ MoE CPU fallback 的主机布局逆变换/反量化辅助函数是生产必需，不是调试代码。
+- 发布文档只归档在 `work-docs/glm53flash`，不要重新拷回 vllm-cl 发布分支。
+
+### 8.6 NaN 故障的两个根因
+
+1. **KDA state pool 地址溢出**：DLC 下指针/`unsigned long` 为 32 位，超过 16 GiB
+   的地址计算溢出，gather 未写入输出。修复在
+   `DLC_Custom_Kernel/dlc_kernels/attention/kda/kda_state_pool.h`，gather/scatter
+   同时改为 64 位地址运算。
+2. **sparse MLA null block 污染**：V1 dummy warmup 以全 0 slot mapping 执行，
+   污染 11 个 indexer 层的 block 0。修复在
+   `vllm-cl/vllm_cl/worker/dlc_worker.py::compile_or_warm_up_model()`，所有 warmup
+   后重新清零 block 0。
+
+只修 KDA 时首个 NaN 从 layer 0 移到 layer 3，说明两个根因串联。完整证据链与 SOP
+见第 10 节文档索引。
+
+### 8.7 文档入口
+
+统一目录：`work-docs/glm53flash/vllm-cl/docs/glm5_flash/`
+
+- 对外部署：`GLM-5.3-Flash_模型服务使用指南_2026-10-23.md`
+- 代码清理/合入：`GLM-5.3-Flash_代码清理与合并说明_2026-10-23.md`
+- Graph：`GLM-5.3-Flash_Graph捕获验证_2026-10-22.md`
+- NaN/SOP：`GLM-5.3-Flash_NaN问题排查总结与SOP_2026-10-22.md`
+- 发布前验证：`GLM-5.3-Flash_发布前功能与性能验证_2026-10-22.md`
+- KPool #09：`KPool_09_select_topk_性能量化_2026-10-22.md`
+- 早期适配：`GLM-5.3-Flash_vLLM-CL_联调问题与修复记录.md`、
+  `GLM-5.3-Flash_vLLM-CL_适配研究.md`、`GLM-5.3-Flash_vLLM-CL_阻断点2-7.md`
+
+---
+
+## 9. 常见问题排查入口
 
 | 现象 | 先查 |
 |---|---|
@@ -284,10 +439,15 @@ torch.ones(5, device='dlc')
 | kernel 未生效/回退 CPU | `dlc_src/enabled_kernels.hpp` 的 `DispatchType`、`libcustom_dlc_perf_lib.so` 是否最新 |
 | 想只用模拟器 | `export DLC_SYN_USE_SIM=1` |
 | 性能/时序分析 | `synapse_perf/syn_perf` + `DLCsim/profiler` |
+| GLM 输出全 `!` / NaN | 先读 NaN SOP；检查 KDA 64 位地址修复是否已编进 kernel，warmup 后是否重新清零 sparse MLA block 0 |
+| Graph 启动失败 / `query_start_loc must cover` | 检查 vLLM KDA/GDN padding 修复、KPool #19 持久 slots、graph bucket padding |
+| `vllm bench serve` 报 `libcudart.so.13` | 安装 DLC `torchaudio/torchvision` wheel，不要用 CUDA 版；临时可加 compat PYTHONPATH |
+| 请求卡在 running | 停服务，`peek.sh -s status -t N`、`peek_stuck.sh -t N`；确认无占用进程后 `cltechpd_clnt -s --full` |
+| 长上下文吞吐退化 | 先看 prefill 时间；#09 在长 prefill/长上下文 decode 已知慢于 native，当前不做形状门禁 |
 
 ---
 
-## 9. 目录速查（`/root/workspace`）
+## 10. 目录速查（`/root/workspace`）
 
 ```
 DLCSynapse/        运行时核心（synapse_core / synapse_backend / dlc_runtime / dlc_thunk / synapse_perf）
@@ -298,6 +458,13 @@ LLVM/              DLC 编译器工具链（dlc target）
 pytorch/           PyTorch fork（device='dlc'）
 vllm/              vLLM fork
 vllm-cl/           vLLM DLC hardware plugin
-update.sh          一键构建脚本
+torchaudio-2.5/    DLC torchaudio 源码
+torchvision/       DLC torchvision 源码
+helper/            compile/update/check_status/get_package 辅助脚本
+work-docs/         设计与验证文档归档（glm53flash/...）
+work-tests/        临时端到端测试脚本
+wheelhouse/        torch/vLLM/vllm-cl/kernel 产物
+wheelhouse-glm53flash/ torchaudio/torchvision DLC wheel
 pyproject.toml     uv 管理的 workspace 元数据
+README.md          项目总览与 GLM 发布状态
 ```
