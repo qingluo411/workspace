@@ -1,0 +1,75 @@
+diff --git a/pytorch_test/README.md b/pytorch_test/README.md
+index 4f3a0d9a3..40af6f6a7 100644
+--- a/pytorch_test/README.md
++++ b/pytorch_test/README.md
+@@ -75,6 +75,47 @@ python main.py test_add_tensor --static --perf
+ python main.py test_add_tensor --dynamic --perf --skip-check
+ ```
+ 
++#### FP8 group128 quantization roundtrip / FP8 group128 量化往返
++
++`tools/check_fp8_g128_roundtrip.py` checks the existing E4M3FN group128
++quantization and BF16 dequantization through the PyTorch interfaces. Run from
++`/root/workspace` with its Python environment after rebuilding PyTorch:
++
++```bash
++# Small first run: GLM latent+RoPE width, normal and outlier inputs.
++uv run --no-sync --project /root/workspace /root/workspace/.venv/bin/python \
++  DLC_Custom_Kernel/pytorch_test/tools/check_fp8_g128_roundtrip.py \
++  --device dlc:0 --shape 17,576 --patterns normal outliers
++
++# Default shape/distribution cases, standalone dequantization and API checks.
++uv run --no-sync --project /root/workspace /root/workspace/.venv/bin/python \
++  DLC_Custom_Kernel/pytorch_test/tools/check_fp8_g128_roundtrip.py \
++  --device dlc:0 --json /tmp/fp8_g128_report.json
++
++# CPU reference self-check; usable before rebuilding, never launches DLC work.
++uv run --no-sync --project /root/workspace /root/workspace/.venv/bin/python \
++  DLC_Custom_Kernel/pytorch_test/tools/check_fp8_g128_roundtrip.py --cpu-only
++```
++
++The new interface is
++`torch.dlc_dequant_e4m3(input, scale, output, group_size=128) -> None`.
++It writes the caller-provided BF16 output. All tensors must be contiguous,
++two-dimensional, on the same DLC device, and have zero storage offset:
++input is E4M3FN `[T,D]`, scale is uint8 `[T,ceil(D/128)]`, and output is
++BF16 `[T,D]` with separate storage. Empty inputs are no-ops. The scale codes
++use the existing kernel convention `2**(code-127)`; this API does not introduce
++group32 or claim MXFP8 special-code compatibility.
++
++The script compares FP8 bytes, scale codes and restored BF16 against a CPU
++reference, and separately reports quantization loss (max absolute error, RMSE,
++cosine similarity and values rounded to zero). It also accepts
++`--input sample.pt` for one saved CPU BF16 `[T,D]` tensor. It initializes FP8
++test buffers on CPU and copies the same dtype to DLC, avoiding the unrelated
++native FP8 `zeros/fill_` gap. Production conversion uses the two dedicated
++device operators, not generic device FP8 casts. Rebuilding the kernel library
++is unnecessary if the installed library already contains
++`custom_dequant_e4m3_g128_bf16`.
++
+ #### Dynamic Coverage Resume / 动态覆盖率断点续跑
+ 
+ Dynamic coverage fuzzing persists progress in the SQLite database by default and can resume into the same `run_id`.
+diff --git a/pytorch_test/test_kernel/test_dequant_fp8_g128_bf16.py b/pytorch_test/test_kernel/test_dequant_fp8_g128_bf16.py
+index 0750537d8..68e97f632 100644
+--- a/pytorch_test/test_kernel/test_dequant_fp8_g128_bf16.py
++++ b/pytorch_test/test_kernel/test_dequant_fp8_g128_bf16.py
+@@ -14,7 +14,7 @@ E5M2_DTYPE = torch.float8_e5m2
+ 
+ E4M3_CODES = [
+     0x00, 0x01, 0x07, 0x08, 0x10, 0x20, 0x38, 0x40,
+-    0x48, 0x50, 0x58, 0x60, 0x70, 0x7B, 0x7E, 0x81,
++    0x48, 0x50, 0x58, 0x60, 0x70, 0x7B, 0x7E, 0x80, 0x81,
+     0x87, 0x88, 0xB8, 0xF8, 0xFB, 0xFE,
+ ]
+ E5M2_CODES = [
+@@ -75,6 +75,9 @@ class TestDequantFp8G128Bf16(TestBase):
+             ("e4m3", 1, 127),
+             ("e5m2", 1, 128),
+             ("e4m3", 2, 129),
++            ("e4m3", 17, 64),
++            ("e4m3", 129, 512),
++            ("e4m3", 257, 576),
+             ("e5m2", 17, 255),
+             ("e4m3", 129, 1025),
+             ("e5m2", 257, 640),

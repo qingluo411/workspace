@@ -1,0 +1,165 @@
+name: 算子需求
+description: 向算子组提交新算子、算子扩展、精度修复或性能优化需求
+title: "[Operator Request] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请提供完整、可复现、可验收的算子需求。涉及内部模型、日志或数据时，请先确认内容可以公开到当前仓库。
+
+  - type: dropdown
+    id: request_type
+    attributes:
+      label: 需求类型
+      options:
+        - 新增算子
+        - 扩展已有算子能力
+        - 修复算子功能或精度
+        - 优化算子性能
+        - 其他
+  - type: dropdown
+    id: priority
+    attributes:
+      label: 优先级
+      description: P0 为阻断发布或核心功能，P1 为重要需求，P2 为一般优化。
+      options:
+        - P0
+        - P1
+        - P2
+  - type: input
+    id: target
+    attributes:
+      label: 目标版本与期望时间
+      placeholder: vLLM DLC 版本 / 目标里程碑 / YYYY-MM-DD
+  - type: input
+    id: operator_name
+    attributes:
+      label: 算子名称
+      description: 填写期望公开的完整算子名；尚未确定时填写建议名称。
+      placeholder: torch.dlc_xxx / torch.ops.dlc.xxx
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景与功能说明
+      description: 说明业务场景、现有实现的问题、算子要完成的功能以及不在本需求范围内的内容。
+      placeholder: |
+        使用场景：
+        当前问题：
+        目标功能：
+        非目标：
+  - type: textarea
+    id: api_signature
+    attributes:
+      label: 期望 API 与函数签名
+      description: 给出 Python/C++ 可见接口、返回值和默认参数。
+      render: python
+      placeholder: |
+        def operator_name(
+            input: torch.Tensor,
+            ...,
+        ) -> torch.Tensor:
+            ...
+  - type: textarea
+    id: parameters
+    attributes:
+      label: 参数与返回值
+      description: 只描述参数角色、Python 类型、默认值和用途；dtype、shape、layout 等统一填写在“支持范围与约束”。
+      placeholder: |
+        输入：
+        - input: torch.Tensor，待处理的输入张量
+
+        属性：
+        - axis: int，默认值 -1，指定计算维度
+
+        返回值：
+        - output: torch.Tensor，算子计算结果
+
+  - type: textarea
+    id: semantics
+    attributes:
+      label: 功能语义
+      description: 详细描述计算公式和行为，必要时附伪代码或 PyTorch reference。
+      placeholder: |
+        计算公式或伪代码：
+        broadcasting/padding/mask 规则：
+        in-place、alias 和输入修改规则：
+        空 tensor、零长度和异常输入行为：
+        确定性与随机数语义：
+  - type: textarea
+    id: supported_range
+    attributes:
+      label: 支持范围与约束
+      description: 集中说明参数和返回值支持的 dtype、shape、数值范围、layout、device、执行模式和硬件范围。
+      placeholder: |
+        各参数支持的 dtype：
+        各参数支持的 shape 及动态范围：
+        数值范围：
+        layout、stride、contiguous 和 device 要求：
+        单卡/多卡及芯片型号：
+        其他限制：
+
+  - type: textarea
+    id: accuracy
+    attributes:
+      label: 精度要求
+      description: 必须给出参考实现、比较方式和量化验收标准。
+      placeholder: |
+        Golden/reference 实现及运行设备：
+        输入数据分布、随机种子和样本数量：
+        比较 dtype：
+        atol：
+        rtol：
+        必须逐元素一致的场景：
+        NaN/Inf/极值/零值处理：
+        累加与中间计算精度：
+  - type: textarea
+    id: test_scope
+    attributes:
+      label: 测试范围
+      description: 将适用项改为 [x]，并补充具体 case、shape 和预期结果。
+      value: |
+        - [ ] 基本功能与 reference 对齐
+        - [ ] 多 dtype 精度
+        - [ ] 静态 shape 与动态 shape
+        - [ ] 最小值、最大值、空 tensor 等边界
+        - [ ] 非 contiguous、特殊 stride 或 layout
+        - [ ] 非法参数和异常处理
+        - [ ] 单卡
+        - [ ] 多卡/分布式
+        - [ ] 长时间稳定性
+        - [ ] 性能基准与性能回归
+
+        具体测试用例、shape、数据范围和预期结果：
+  - type: textarea
+    id: environment
+    attributes:
+      label: 验证环境与依赖版本
+      placeholder: |
+        DLC 硬件：
+        vLLM commit：
+        vLLM DLC commit：
+        PyTorch/torch-dlc：
+        Runtime/driver：
+        Custom Kernel/LLVM：
+        关键环境变量：
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收标准
+      description: 列出算子组和接入方共同确认完成所需满足的可检查条件。
+      placeholder: |
+        - [ ] API、参数校验和错误行为符合约定
+        - [ ] 规定范围内的功能和精度测试通过
+        - [ ] 需求中明确列出的特殊运行场景通过
+        - [ ] 文档、测试和示例已提交
+
+  - type: textarea
+    id: references
+    attributes:
+      label: Reference、日志与附件
+      description: 提供 reference 代码、调用栈、profile、精度对比、设计文档、相关 PR/Issue 或日志。
+      placeholder: |
+        Reference 实现：
+        相关代码/PR/Issue：
+        日志、profile 或精度报告：
+        其他附件：

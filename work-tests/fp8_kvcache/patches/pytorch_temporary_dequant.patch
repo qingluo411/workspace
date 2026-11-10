@@ -1,0 +1,114 @@
+diff --git a/aten/src/ATen/native/dlc/quant_e4m3.cpp b/aten/src/ATen/native/dlc/quant_e4m3.cpp
+index 8ce86ac3f6..55f30a130c 100644
+--- a/aten/src/ATen/native/dlc/quant_e4m3.cpp
++++ b/aten/src/ATen/native/dlc/quant_e4m3.cpp
+@@ -5,6 +5,9 @@
+ #include <torch/library.h>
+ #include <ATen/native/Resize.h>
+ 
++#include <algorithm>
++#include <limits>
++
+ namespace at::native {
+ 
+ Tensor dlc_quant_e4m3(
+@@ -42,4 +45,68 @@ Tensor dlc_quant_e4m3(
+   return output;
+ }
+ 
+-}
+\ No newline at end of file
++void dlc_dequant_e4m3(
++    const Tensor& input,
++    const Tensor& scale,
++    Tensor& output,
++    int64_t group_size) {
++  constexpr auto op = "dlc_dequant_e4m3";
++  TORCH_CHECK(group_size == 128, op, " only supports group_size=128");
++  TORCH_CHECK(input.defined() && scale.defined() && output.defined(),
++              op, " expects defined input, scale and output tensors");
++  TORCH_CHECK(input.is_dlc() && scale.is_dlc() && output.is_dlc(),
++              op, " expects DLC tensors");
++  TORCH_CHECK(input.device() == scale.device() && input.device() == output.device(),
++              op, " expects input, scale and output on the same device");
++  TORCH_CHECK(input.scalar_type() == at::ScalarType::Float8_e4m3fn,
++              op, " expects float8_e4m3fn input");
++  TORCH_CHECK(scale.scalar_type() == at::kByte, op, " expects uint8 scale codes");
++  TORCH_CHECK(output.scalar_type() == at::kBFloat16, op, " expects bfloat16 output");
++  TORCH_CHECK(input.dim() == 2 && scale.dim() == 2 && output.dim() == 2,
++              op, " expects 2D input, scale and output tensors");
++  TORCH_CHECK(input.sizes() == output.sizes(), op, " input and output shapes must match");
++
++  const int64_t num_tokens = input.size(0);
++  const int64_t hidden_size = input.size(1);
++  const int64_t num_groups = hidden_size / 128 + (hidden_size % 128 != 0);
++  TORCH_CHECK(scale.size(0) == num_tokens && scale.size(1) == num_groups,
++              op, " expects scale shape [T, ceil(D / 128)]");
++  TORCH_CHECK(input.is_contiguous() && scale.is_contiguous() && output.is_contiguous(),
++              op, " expects contiguous tensors");
++  TORCH_CHECK(input.storage_offset() == 0 && scale.storage_offset() == 0 &&
++                  output.storage_offset() == 0,
++              op, " expects tensors with storage_offset=0");
++  if (input.numel() == 0) {
++    return;
++  }
++
++  // The kernel ignores strides/offsets and DMA includes each row's padding.
++  TORCH_CHECK(!output.is_alias_of(input) && !output.is_alias_of(scale),
++              op, " output must not share storage with input or scale");
++  constexpr int64_t kernel_int_max = std::numeric_limits<int>::max();
++  TORCH_CHECK(hidden_size <= kernel_int_max - 511 && num_tokens <= kernel_int_max - 127,
++              op, " tensor dimensions exceed the kernel int32 limit");
++  const int64_t fp8_words = ((hidden_size + 511) / 512) * 128;
++  const int64_t bf16_words = ((hidden_size + 255) / 256) * 128;
++  const int64_t scale_words = ((num_groups + 511) / 512) * 128;
++  const int64_t max_row_words = std::max({fp8_words, bf16_words, scale_words});
++  TORCH_CHECK(num_tokens <= kernel_int_max / max_row_words,
++              op, " padded tensor offsets exceed the kernel int32 limit");
++
++  // Match the existing dequant kernel's per-row VMEM allocation.
++  const int64_t hidden_f32_stride = ((hidden_size + 127) / 128) * 128;
++  const int64_t scale_f32_stride = ((num_groups + 127) / 128) * 128;
++  const int64_t row_scratch_words = std::max(fp8_words, bf16_words) +
++      hidden_f32_stride + scale_words + scale_f32_stride;
++  TORCH_CHECK(row_scratch_words <= 3072 * 1024 - 256,
++              op, " a row exceeds the dequant kernel VMEM capacity");
++
++  auto k = at::dlc::KernelDesc();
++  k.input(input);
++  k.input(scale);
++  k.output(output);
++  k.scalar(static_cast<int>(group_size));
++  k.launch("custom_dequant_e4m3_g128_bf16");
++}
++
++}  // namespace at::native
+diff --git a/aten/src/ATen/native/native_functions.yaml b/aten/src/ATen/native/native_functions.yaml
+index acb6a31ac2..b2a61a7106 100755
+--- a/aten/src/ATen/native/native_functions.yaml
++++ b/aten/src/ATen/native/native_functions.yaml
+@@ -17094,6 +17094,11 @@
+   dispatch:
+     DLC: dlc_quant_e4m3
+ 
++- func: dlc_dequant_e4m3(Tensor input, Tensor scale, Tensor(a!) output, int group_size=128) -> ()
++  variants: function
++  dispatch:
++    DLC: dlc_dequant_e4m3
++
+ - func: dlc_indexer_k_quant_and_cache(Tensor k, Tensor kv_cache, Tensor slot_mapping, int quant_block_size) -> Tensor
+   variants: function
+   dispatch:
+diff --git a/torchgen/native_function_generation.py b/torchgen/native_function_generation.py
+index 04ce5f1f93..306863f9ae 100644
+--- a/torchgen/native_function_generation.py
++++ b/torchgen/native_function_generation.py
+@@ -48,6 +48,8 @@ MUTABLE_OPS_THAT_CANNOT_GET_AN_OUT_VARIANT = [
+     "_cummin_helper",
+     # Writes three caller-provided output buffers and has no functional return.
+     "dlc_minimaxm2_qknorm",
++    # Writes the caller-provided BF16 buffer; keep the positional output API.
++    "dlc_dequant_e4m3",
+ ]
+ 
+ # All of these operators don't have any tensor like returns

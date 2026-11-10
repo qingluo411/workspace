@@ -1,0 +1,10 @@
+# Test captures, generated reports, and binary artifacts
+*.csv
+*.gz
+*.json
+*.log
+*.pt
+*.txt
+
+__pycache__/
+*.py[oc]

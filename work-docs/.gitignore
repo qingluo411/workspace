@@ -1,0 +1,10 @@
+# Generated measurements, logs, and binary artifacts
+*.ansi
+*.csv
+*.gz
+*.json
+*.log
+*.txt
+
+__pycache__/
+*.py[oc]
