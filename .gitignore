@@ -18,7 +18,6 @@ wheels/
 /pytorch/
 /vllm/
 /vllm-cl/
-/sites/fp8-kv-review/
 /log/
 *.so
 *.whl
