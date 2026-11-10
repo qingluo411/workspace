@@ -3,8 +3,9 @@
 > 本文档用于快速回忆本仓库群（`/root/workspace`）的全貌：芯片、分层架构、
 > 各仓库职责、构建顺序、运行时调用链与当前环境状态。
 >
-> 最后更新：2026-10-27。当前重点是 **GLM-5.3-Flash-Mix** 的
+> 最后更新：2026-11-10。当前重点是 **GLM-5.3-Flash-Mix** 的
 > `release-glm53flash` 发布线；仓库 HEAD、驱动、发布结论和文档入口见下表与第 7/8 节。
+> 根仓库的文档/测试追踪策略见第 10.1 节。
 > 面向人阅读的项目总览见根目录 `README.md`。
 
 ---
@@ -98,12 +99,14 @@ PyTorch 以 `device='dlc'` 接入 → vLLM 通过硬件插件跑推理。
 | **vllm** | `release-glm53flash` | `8cfd356105` | vLLM DLC fork；KDA graph padding 修正 |
 | **vllm-cl** | `release-glm53flash` | `253bd69` | GLM 模型、算子、KV cache、Graph patch 主实现；工作区仅 `vllm_cl/_version.py` 为生成式改动 |
 
-> 所有仓库 remote 均为 `git@github.com:ChipLTech/<repo>.git`。
+> 上表嵌套组件仓库的 remote 均为 `git@github.com:ChipLTech/<repo>.git`；
+> 根 `workspace` 仓库是本地 Git 仓库，当前未配置 remote。
 > `torchaudio-2.5/`、`torchvision/` 为 DLC 媒体依赖源码，发布 wheel 已在
 > `wheelhouse-glm53flash/`；不要用 PyPI 的 CUDA 版覆盖。
 >
 > `release-glm53flash` 是当前唯一交付线；早期 bring-up 特性分支只作历史参考。
-> 新修复继续提交到 release 分支，模型文档继续归档在 `work-docs/glm53flash`。
+> 新修复继续提交到 release 分支，模型文档继续归档在 `work-docs/glm53flash`；
+> 其中的纯文档/源码由根仓库追踪。
 
 ### 官方依赖图（`DLC_Custom_Kernel/README.md`）
 
@@ -298,7 +301,7 @@ torch.ones(5, device='dlc')
 
 ---
 
-## 7. 当前环境状态（2026-10-27）
+## 7. 当前环境状态（发布基线：2026-10-27）
 
 | 组件 | 状态 |
 |---|---|
@@ -319,11 +322,14 @@ torch.ones(5, device='dlc')
   vllm-cl `0.1.dev...`、torchaudio `2.5.0a0...`），不是交付 wheel 版本；判断部署
   版本应看 wheel 文件名、`direct_url.json` 或模块版本文件。
 - 本机没有可用 Triton driver；vLLM 会提示 V2 runner 不可用并回落 V1，这是当前预期。
+- 2026-11-10：根仓库已将 `work-docs/`、`work-tests/` 的纯文档与源码纳入追踪
+  （提交 `54ab87e`，215 个文件、约 3.85 MiB）；日志、测量结果、trace、压缩包和
+  张量数据仍忽略。当前根仓库共追踪 231 个文件、约 4.07 MiB。
 - 本地生成改动：`DLCsim/lib-rt/*.hex`、`vllm-cl/vllm_cl/_version.py`；提交前应确认是否需要纳入。
 
 ---
 
-## 8. GLM-5.3-Flash 发布状态（2026-10-27）
+## 8. GLM-5.3-Flash 发布状态（发布验证基线：2026-10-27）
 
 ### 8.1 模型与生产路径
 
@@ -397,7 +403,8 @@ KV cache 容量和 `FULL_DECODE_ONLY`。
   不按形状设门禁，prefill/decode 统一走 `#07 + #09`。
 - 硬件不支持计算/通信重叠；集合通信等待仍是主要优化空间。
 - AWQ MoE CPU fallback 的主机布局逆变换/反量化辅助函数是生产必需，不是调试代码。
-- 发布文档只归档在 `work-docs/glm53flash`，不要重新拷回 vllm-cl 发布分支。
+- 发布文档只归档在 `work-docs/glm53flash`，不要重新拷回 vllm-cl 发布分支；
+  根仓库只追踪其中的纯文档/源码，测量产物忽略规则见第 10.1 节。
 
 ### 8.6 NaN 故障的两个根因
 
@@ -461,10 +468,31 @@ vllm-cl/           vLLM DLC hardware plugin
 torchaudio-2.5/    DLC torchaudio 源码
 torchvision/       DLC torchvision 源码
 helper/            compile/update/check_status/get_package 辅助脚本
-work-docs/         设计与验证文档归档（glm53flash/...）
-work-tests/        临时端到端测试脚本
+work-docs/         设计与验证文档归档；纯文档/源码入库，测量产物忽略
+work-tests/        端到端测试源码；capture/results/reports 等产物忽略
 wheelhouse/        torch/vLLM/vllm-cl/kernel 产物
 wheelhouse-glm53flash/ torchaudio/torchvision DLC wheel
 pyproject.toml     uv 管理的 workspace 元数据
 README.md          项目总览与 GLM 发布状态
 ```
+
+### 10.1 根仓库与文档/测试追踪
+
+`/root/workspace` 自身是一个本地 `master` Git 仓库，当前未配置 remote。它管理顶层
+编排文件、`work-docs/` 和 `work-tests/`；`LLVM/`、`DLCsim/` 等嵌套组件仍是独立
+仓库，由根 `.gitignore` 排除。
+
+截至 2026-11-10：
+
+- 根仓库追踪 231 个文件、约 4.07 MiB；其中 `work-docs/` 182 个、`work-tests/` 33 个，
+  合计 215 个、约 3.85 MiB。文档/源码纳入提交为 `54ab87e`。
+- `work-docs/.gitignore` 忽略 `*.ansi`、`*.csv`、`*.gz`、`*.json`、`*.log`、
+  `*.txt`、`__pycache__/`、`*.py[oc]`；追踪 `.md`、`.py`、`.sh`、`.patch`、
+  `.yml`、`.html`、`.pdf`。
+- `work-tests/.gitignore` 忽略 `*.csv`、`*.gz`、`*.json`、`*.log`、`*.pt`、
+  `*.txt`、`__pycache__/`、`*.py[oc]`；追踪 `.md`、`.py`、`.sh`、`.patch`。
+- 追踪规则以两个目录内已入库的 `.gitignore` 为准；`.git/info/exclude` 仅用于本机
+  临时排除，不承载团队共享策略。
+- 新增普通文档/源码可直接 `git add`。若文件类型属于上述忽略项但确需入库，先确认
+  用途，再调整对应目录的 `.gitignore`，或用 `git add -f` 只纳入单个文件。不要恢复
+  目录级整体忽略，也不要把 capture/results/reports 等大文件批量入库。
