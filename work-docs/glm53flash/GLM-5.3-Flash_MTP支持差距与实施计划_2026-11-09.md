@@ -207,7 +207,11 @@ eh_input = cat(enorm(embed), hnorm(previous_hidden))
 `[B,next_n]` state indices 和 accepted 快照。新增 wrapper 用例和 graph replay 用例
 均已通过。
 
-### 6.4 KPool speculative transaction（机制已验证，runner 尚未接入）
+### 6.4 KPool speculative transaction（已接入，端到端仍有残余漂移）
+
+> 2026-11-10 更新：transaction 已接入 runner，并修复了 prefill 提交范围和
+> pool-row 快照语义；但 MTP greedy 端到端仍存在间歇性 target 错 token。最新排查见
+> `GLM-5.3-Flash_MTP端到端排查记录_2026-11-10.md`。
 
 这是 MTP 的核心正确性风险。当前 target verify 的 KPool 路径在一次 forward 中：
 
@@ -431,8 +435,9 @@ MTP 会增加：
 
 - KDA spec 算子契约已经可用，不需要先写新 kernel；
 - KPool `#09/#19`、compact top-k、rejection sampler、BF16 MoE 的算子路径可用；
-- KPool 事务的正确性方案已验证，但 runner 尚未接入；
+- KPool transaction 已接入 runner，并修复 prefill 提交范围与 pool-row 快照；
+  端到端仍存在间歇性 target 错 token，详见 2026-11-10 排查记录；
 - `fused_eh_norm` 功能 fallback 可用，性能融合尚未做；
-- 当前真实服务被非算子的 draft 多 KV group 问题阻断；
+- draft 多 KV group 已完成接入，不再是阻断项；
 - 生产几何 `H=4096 / I=2048 / 288 experts` 的 MoE 仍需在模型级做性能和峰值显存验证，
   当前小形状已证明 288-expert dispatch 路径正确。
