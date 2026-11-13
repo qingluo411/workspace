@@ -6,7 +6,12 @@
 
 ## 1. 结论
 
-当前发布路径没有启用 MTP，但并不是“从零实现”。上游 vLLM 已有
+**2026-11-13 状态**：MTP eager 与 `FULL_DECODE_ONLY` graph 均已打通；单请求
+greedy、in-flight 1/8/16/32/64 并发和 17K/34K/64.6K 长上下文语义验证通过。
+当前主要剩余 AIME26、正式 acceptance/性能验收和 `num_speculative_tokens>1`。
+详细结果见第 13 节。
+
+最初评估时发布路径没有启用 MTP，但并不是“从零实现”。上游 vLLM 已有
 `Glm5NextMTPModel`、MTP 配置探测、Eagle/MTP proposer、rejection sampler 和
 decode graph 基础设施；KDA/KPool 的底层 DLC 算子也有相当一部分已经覆盖
 spec 语义。真正需要补的是 **GLM-5.3 特有的模型/缓存事务接线**，集中在：
@@ -31,9 +36,9 @@ spec 语义。真正需要补的是 **GLM-5.3 特有的模型/缓存事务接线
 | `pytorch` | `release-glm53flash` | 同上 |
 | `vllm` | `release-glm53flash` | 跟踪 `origin/release-glm53flash` |
 | `vllm-cl` | `release-glm53flash` | 比远端多一个本地提交 `b3cb855` |
-| `LLVM` / `DLCsim` / `DLCSynapse` / `DLC_CL` | `main` | 远端没有 `release-glm53flash` 分支 |
+| `LLVM` / `CLsim` / `DLCSynapse` / `DLC_CL` | `main` | 远端没有 `release-glm53flash` 分支 |
 
-`DLCsim/lib-rt/*.hex` 仍有既有的本地 TYD CRT 改动，未纳入本次 MTP 工作。
+模拟器已切换到 `CLsim`；`DLCsim` 仅保留仓库和旧安装目录用于回滚，不参与当前 MTP 工作。
 
 ## 3. 已有基础
 
@@ -441,3 +446,79 @@ MTP 会增加：
 - draft 多 KV group 已完成接入，不再是阻断项；
 - 生产几何 `H=4096 / I=2048 / 288 experts` 的 MoE 仍需在模型级做性能和峰值显存验证，
   当前小形状已证明 288-expert dispatch 路径正确。
+
+## 12. 2026-11-12 状态更新
+
+本轮已完成 MTP eager 单请求 greedy 精度闭环：固定 8-token prompt、32-token
+输出重复运行 **50/50 与无 MTP baseline 逐 token 一致**；无 MTP
+`FULL_DECODE_ONLY` graph 回归 **20/20**。KPool transaction、KDA spec 和高 state
+slot 相关定向测试共 **77 passed**（41 + 36）。
+
+根因最终收敛到 **`g_a` strided slice 的模型侧 DLC 物化/staging 路径**：`g_a`
+是融合投影的 `[T,128]` 末分片，交给 `g_b_proj` 前由 launcher 隐式复制时，失败
+样本可反解出前 32 个 BF16 元素仍是旧值，导致 GEMM row 0 的全部输出列受影响。
+`projected`、`g_a`、KDA core 和权重均已排除。精确 shape 的独立
+`custom_slice_16bit` syntest 与 2000 次连续下发 stress 均通过；但
+`work-tests/mtp/run_slice_staging_compare.py` 的两阶段耦合测例（phase A 用
+`index_select` 保存正确结果，phase B 用 split view 触发 staging）已经稳定复现：
+T=2 原始 view 约 211/1000 失败，显式 `.contiguous()` 约 282/1000 失败，而
+`index_select` 0/1000 失败；T=1/8 未复现，T=3..7 也可触发。显式 contiguous
+的 `g_a_input` 仍有 32 个错误元素，且输出预清零不能修复，说明问题在 slice/copy
+物化本身，而不是 GEMM 输出 buffer。首个失败样本的错误 32 个 BF16 元素与
+producer 输入 `hidden[0:32]` 逐字节相同，说明 staging 首段很可能残留了前序
+in_proj 使用过的 VMEM 数据。
+
+已在 `DLC_Custom_Kernel/dlc_kernels/copy/slice_16bit.cpp` 的 branch 5 将
+`bf16_offmemcpy(CMEM)` 改为独立的 `bf16_v2v_withoff(VMEM) -> vmem_to_hbm` 路径；
+修复库已安装并验证：耦合测例 T=2 的 view/contiguous 1000 次、T=1..8 shape 矩阵、
+`slice_bf16` 43 项、`slice_mtp_stress` 2000 次均通过，MTP eager 为 50/50。
+
+模型侧随后关闭了 `index_select`，让 KDA 直接使用旧 `g_a` split view；修复后的
+kernel 在真实 MTP 模型上再次通过 **50/50**，因此已移除该 workaround，生产路径
+直接走修复后的 `custom_slice_16bit`。详细证据、日志与验证见：
+
+`GLM-5.3-Flash_MTP端到端排查记录_2026-11-10.md` 第 10.6 节。
+
+结论：MTP eager 单请求精度阻断已关闭；`custom_slice_16bit` staging 根修已完成，
+并通过耦合/单元回归及真实 split-view MTP 50/50。MTP + `FULL_DECODE_ONLY` graph
+已完成单请求、in-flight 1/8/16/32/64 并发和 17K/34K/64.6K 长上下文语义验证。
+发布前仍需完成 AIME26、正式 acceptance/性能验收和更深 spec depth 验证。
+
+2026-11-13 又在最终修复库上重跑无 MTP `FULL_DECODE_ONLY` graph 固定请求，
+结果为 **20/20**，日志：
+`/root/workspace/log/baseline_slicefix_graph2_20261113.log`。该轮使用
+`GPU_MEMORY_UTILIZATION=0.80`、`max-num-batched-tokens=1024`、
+`max-num-seqs=1`，未启用 MTP；测试后服务已停止。
+
+## 13. 2026-11-13 MTP graph / 并发 / 长上下文验证
+
+### 13.1 本轮修复
+
+| 文件 | 修复 |
+|---|---|
+| `vllm-cl/vllm_cl/worker/dlc_model_runner.py` | `_dummy_run()` 为 MTP verify warmup 填充 dummy `num_decode_draft_tokens` / `num_accepted_tokens`，避免被 GDN 归类为 prefill |
+| `vllm-cl/vllm_cl/patch/patch_kda.py` | `gather_initial_states_dlc()` / `scatter_states_dlc()` 将非连续或非 int32 indices 归一化为同设备连续 int32 |
+| `vllm/vllm/v1/attention/backends/gdn_attn.py` | spec graph 的 `spec_query_start_loc` 尾部覆盖 padded token；修复 batch 缩小时 KDA `synErrorLaunchFailure` |
+| `vllm/tests/v1/attention/test_gdn_metadata_builder.py` | 新增 `test_full_cudagraph_spec_metadata_covers_padded_tokens` |
+
+### 13.2 验证结果
+
+- MTP + `FULL_DECODE_ONLY` graph 单请求固定 greedy：**20/20**。
+- 并发语义（每请求唯一 marker）：in-flight 1/8/16/32/64 两轮全部通过。
+- 长上下文 marker 检索：17,025 / 34,025 / 64,625 token 全部命中，MTP graph 与
+  MTP eager 耗时基本一致。
+- 4K 配置实际同时 `Running` 峰值约 20（KDA state/KV 容量限制）；32/64 档为
+  in-flight/排队执行，不等价于 32/64 同时 decode。proposer graph 已确认在
+  reqs=1/4/8/12/16/20 上 replay。
+- 随机 token 长 prompt 的 greedy 输出在 no-MTP baseline 自身也会跨服务分叉，
+  因此长上下文改用 needle marker 语义验收，不采用逐 token 全等。
+
+详细数据、日志和边界说明见
+`GLM-5.3-Flash_MTP端到端排查记录_2026-11-10.md` 第 10.7 节。
+
+### 13.3 尚未完成
+
+- AIME26 端到端精度；
+- 正式 acceptance rate、TTFT/TPOT、吞吐和显存峰值对比；
+- `num_speculative_tokens>1`；
+- 若要求真正 32/64 同时 decode，需要先降低每请求 KDA state/KV 占用。
