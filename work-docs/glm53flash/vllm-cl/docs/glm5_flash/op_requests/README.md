@@ -3,6 +3,11 @@
 本目录保存 GLM-5.3-Flash 在 DLC 上从「纯 PyTorch native 组合实现」迁移到「融合算子」的
 算子需求 issue 草稿，共 **18 个**，按 `docs/glm5_flash/op_request.yml` 的 Issue Form 字段顺序编写。
 
+> **2026-11-13 追加（MTP）**：新增 **#20 `dlc_fused_eh_norm_bf16`**（P1）。
+> 这是目前唯一确认的 MTP 专属融合算子：当前 `fused_eh_norm_dlc` 是 mask + 两次
+> RMSNorm + cat 的 Python fallback，`T=4/H=4096` 约 0.58 ms。详见
+> [`20_dlc_fused_eh_norm.md`](20_dlc_fused_eh_norm.md)。
+
 ## 背景
 
 当前 GLM-5.3-Flash 适配在 DLC 上全部走 native PyTorch 组合实现（见各文件的「背景与功能说明」），
@@ -122,6 +127,7 @@
 | 17 | `dlc_fused_q_kv_rmsnorm` | 新增 | P2 | `vllm_cl/patch/patch_fused_qk_rmsnorm.py` | 视觉塔 Q/K RMSNorm |
 | 18 | `dlc_kv_cache_zero_blocks` | 新增 | P0 | `vllm_cl/patch/patch_kv_block_zeroer.py:193` | KV cache 物理块清零；当前 `zero_()` 被注释禁用，须恢复语义并消除 view 布局转换 |
 | 19 | `dlc_kpool_slot_mapping` | 新增 | P1 | `vllm_cl/patch/models/kpool_slot_mapping.py:18`、`vllm_cl/patch/patch_mla_indexer.py:119`、`vllm_cl/kpool_worker_slots.py:28` | 池槽 + tail 环槽双输出；DLC 无 `searchsorted`，现为每步 2 次 CPU 往返（2026-10-09 新增，承接 08 号的 tail slot 部分） |
+| 20 | `dlc_fused_eh_norm_bf16` | 新增 | P1 | `vllm_cl/patch/models/patch_glm5_mtp.py:33` | MTP EH norm 融合：position mask + 两路 RMSNorm + concat；当前 fallback `T=4/H=4096` 约 0.58 ms（2026-11-13 新增） |
 
 ## 需求分类总表（2026-09-22 定稿）
 
@@ -146,6 +152,7 @@
 | 17 | `dlc_fused_q_kv_rmsnorm` | 可复用（撤回） | 其他 | P2 | 两次 `dlc_fused_rms_norm_f32_bf16` 即等价 → 插件接入，不提交 |
 | 18 | `dlc_kv_cache_zero_blocks` | 可复用（撤回） | 其他 | P2 | 5 类页（4,096~524,288 B）全为 512B 整数倍，真实页几何实测 bit-exact → 插件接入，不提交 |
 | 19 | `dlc_kpool_slot_mapping` | 完全新算子 | 新增算子 | P1 | 未覆盖（DLC 无 `searchsorted`/`bucketize`；`convert_req_index_to_global_index` 不含边界求 request id 这一步）→ 提交。pool 槽 + tail 环槽合并为一条双输出算子，省掉每步 2 次 CPU 往返（V1：worker + pool builder；tail builder 那次已由插件侧去重） |
+| 20 | `dlc_fused_eh_norm_bf16` | 完全新算子 | 新增算子 | P1 | 现有 DLC RMSNorm 仅单输入 FP32，无 position mask + 两路 RMSNorm + concat；MTP 专属融合，提交 |
 
 分类统计（2026-09-22 晚最终，见上方「新算子实测」）：完全新算子 6 / 需扩展 1 / **需修复 5** /
 可复用（撤回）6 → **实际提交 12 条**：01、02、03、04、07、08、09、10、11、13、15、16。

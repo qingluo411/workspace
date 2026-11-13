@@ -178,6 +178,10 @@ eh_input = cat(enorm(embed), hnorm(previous_hidden))
 当前实现：`patch_glm5_mtp.fused_eh_norm_dlc`，已覆盖 position 0 mask、CPU reference
 和真实 DLC 设备执行。当前版本是功能 fallback，尚未做融合性能优化。
 
+算子需求 issue 草稿：
+`work-docs/glm53flash/vllm-cl/docs/glm5_flash/op_requests/20_dlc_fused_eh_norm.md`
+（建议公开名 `torch.dlc_fused_eh_norm_bf16`，P1）。
+
 ### 6.3 KDA spec verify（wrapper 已实现，已验证）
 
 `vllm-cl/patch/patch_kda.py` 当前有三处显式拦截：
