@@ -83,7 +83,7 @@ def dlc_kimi_k3_kda_packed_decode(
     A_log: torch.Tensor,              # [H], FP32
     dt_bias: torch.Tensor,            # [H*D], FP32
     initial_state: torch.Tensor,      # [num_pages, H, Dv, Dk], FP32，原位更新
-    state_indices: torch.Tensor,      # [T], int32，0=null/1-based pages
+    state_indices: torch.Tensor,      # [T], int32，<=0=null；正值为 state 物理行号
     *,
     lower_bound: float = -5.0,
     scale: float | None = None,
@@ -102,8 +102,9 @@ def dlc_kimi_k3_kda_packed_decode(
 - `A_log`：每 head 一个 FP32 参数。
 - `dt_bias`：每 head 的 K 维 bias，长度 `H*Dk`。
 - `initial_state`：分页 recurrent state，最后一个 `Dv×Dk` 维度连续。
-- `state_indices`：每个 token 的物理 page；`0` 为 K3 null block，输出为 0 且不更新 state；
-  负值按 null 处理。
+- `state_indices`：每个 token 的物理 state page；`<=0` 为 null，输出为 0 且不更新 state。
+  正值直接作为 `initial_state[page]` 的 dim0 行号，不做 `page - 1`；K3 的 state row 0
+  保留为 null，有效 page 为 `1 .. num_pages-1`。
 - `lower_bound`：K3 为 -5.0。
 - `scale`：默认 `Dk**-0.5`。
 
@@ -126,23 +127,44 @@ if state_indices[t] <= 0:
     state unchanged
     continue
 
-S = state[state_indices[t]]
-gate = lower_bound * sigmoid(exp(A_log[h]) * (raw_g[t,h,:] + dt_bias[h,:]))
-S *= exp(gate)[:, None]
-beta = sigmoid(raw_beta[t,h])
-v = beta * (v - S.T @ k)
-S += v[:, None] * k[None, :]
-out[t,h,:] = S.T @ q
-state[state_indices[t]] = S
+page = state_indices[t]
+S = state[page, h]                         # [Dv, Dk]
+gate = lower_bound * sigmoid(
+    exp(A_log[h]) * (raw_g[t,h,:] + dt_bias[h,:])
+)                                           # [Dk]
+S = S * exp(gate)[None, :]                  # 沿 Dk 衰减，广播到 Dv 行
+beta = sigmoid(raw_beta[t,h])               # scalar
+delta = beta * (v - S @ k)                  # [Dv,Dk] @ [Dk] -> [Dv]
+S = S + delta[:, None] * k[None, :]         # [Dv,1] * [1,Dk] -> [Dv,Dk]
+out[t,h,:] = S @ q                          # [Dv,Dk] @ [Dk] -> [Dv]
+state[page, h] = S
 ```
 
 Q/K normalization：`x / sqrt(sum(x^2) + 1e-6)`。
 
+state 的固定布局和乘法方向：
+
+- `initial_state`：`[num_pages, H, Dv, Dk]`；
+- 每个 `(page, head)` 的 state：`[Dv, Dk]`，最后一维连续；
+- gate 形状：`[Dk]`，每个 key channel 一个 decay；
+- `S @ k`、`S @ q` 都必须左乘 state；不能写成 `S.T @ k` / `S.T @ q`；
+- `delta[:, None] * k[None, :]` 是 `[Dv,Dk]` 的 rank-1 更新。
+
 边界：
 
 - `T=0`：返回 `[1,0,H,Dv]`，state 不变；
-- `state_indices=0` 或负值：输出 0，state 不变；
-- 重复 state index：同一 token 内语义按调用顺序；建议报错以避免歧义；
+- `state_indices<=0`：输出 0，state 不变；
+- 正 state index 必须在本调用内唯一，这是调用前置条件（precondition）。不同
+  token/head 是并行执行的，不允许依赖“按 token 顺序处理”；重复正 index 会形成同一
+  state page 的并发读写竞争，属于非法输入。
+- 生产算子不得为了检查重复而在调用路径上读取 device `state_indices` 到 host：
+  `tolist()` / `item()` / `int(tensor)` 会产生 D2H 和同步，破坏 graph capture 和
+  no-host-sync 目标。唯一性应由 state page allocator/scheduler 在 CPU metadata
+  生成阶段保证。
+- 如需强校验，只能在非 graph 的 debug/validation 路径执行，或对本来就是 CPU 的
+  page metadata 校验后再 H2D；主 kernel 和图内路径假定 precondition 已满足。
+- 确有“多个 token 顺序更新同一 state”的需求时，应使用带 `query_start_loc` 的通用
+  recurrent decode，而不是本 packed decode。
 - 越界 index：报错。
 
 ## 支持范围与约束
@@ -199,9 +221,15 @@ Golden / reference：
 
 1. `H ∈ {1,12,96}`，`T ∈ {0,1,8,64,256}`，Dk=Dv=128。
 2. state dim0 stride 连续和 padded 两种；state index 含 0、负数、乱序。
-3. beta 极值、gate 下界、全 0 q/k、state 全 0。
-4. 与通用 recurrent decode 的 T=1 交叉验证。
-5. 性能：T=1 单次目标 ≤ 100 us；18 层 decode 总成本 ≤ 2 ms；相对当前 split+recurrent
+   正 index 必须唯一；重复正 index 只放在非 graph 的校验器测试中，不作为 kernel
+   运行时 D2H 用例。
+3. gate 轴与 state 方向探针：构造非对称 `[Dv,Dk]` state，并让 gate 只沿 Dk 变化，
+   验证 decay 广播到 Dv 行而不是 Dk 列；同时验证 `S @ k`、`S @ q`，转置实现必须失败。
+4. 直接 page 索引探针：令 `state[p]` 与 `state[p-1]` 不同，正 index `p` 必须直接访问
+   `state[p]`，不得读取或写回 `state[p-1]`。
+5. beta 极值、gate 下界、全 0 q/k、state 全 0。
+6. 与通用 recurrent decode 的 T=1 交叉验证。
+7. 性能：T=1 单次目标 ≤ 100 us；18 层 decode 总成本 ≤ 2 ms；相对当前 split+recurrent
    wrapper 减少至少一次 host 侧准备和 2 次 dispatch。
 
 ## 验证环境与依赖版本
@@ -219,6 +247,9 @@ DLC_Custom_Kernel：55b9aef7e0cb
 
 - [ ] API、参数校验和错误行为符合约定。
 - [ ] null state index 输出 0 且 state bit-exact。
+- [ ] gate 沿 Dk 衰减；state 为 `[Dv,Dk]`，使用 `S @ k` / `S @ q`。
+- [ ] 正 state index 直接索引初始 state，不做 `-1`；唯一性作为 precondition，
+      graph 路径不产生 D2H；可选非 graph 校验器能拒绝重复正 index。
 - [ ] output `atol=2e-2, rtol=2e-2`；state `atol=1e-3, rtol=1e-3`。
 - [ ] 与通用 recurrent decode 在 T=1 数值一致。
 - [ ] T=1 ≤ 100 us、18 层 ≤ 2 ms（首期目标）。
@@ -273,9 +304,17 @@ def kda_packed_decode_reference(
     )
     bias = dt_bias.view(heads, key_dim).float()
     a = torch.exp(A_log.float())
+    pages = [int(page) for page in state_indices.detach().cpu().tolist()]
+    positive_pages = [page for page in pages if page > 0]
+    if len(positive_pages) != len(set(positive_pages)):
+        raise ValueError(
+            "positive state_indices must be unique within one packed decode call"
+        )
+    if any(page >= initial_state.shape[0] for page in positive_pages):
+        raise ValueError("state index is outside initial_state")
 
     for token_idx in range(tokens):
-        page = int(state_indices[token_idx])
+        page = pages[token_idx]
         if page <= 0:
             continue
 
@@ -283,7 +322,8 @@ def kda_packed_decode_reference(
         gate = lower_bound * torch.sigmoid(
             a[:, None] * (raw_g[0, token_idx].float() + bias)
         )
-        state = state * torch.exp(gate)[:, :, None]
+        # gate: [H, Dk], state: [H, Dv, Dk] -> broadcast over Dv.
+        state = state * torch.exp(gate)[:, None, :]
 
         beta = torch.sigmoid(raw_beta[0, token_idx].float())
         delta = beta[:, None] * (
@@ -304,5 +344,6 @@ def kda_packed_decode_reference(
 ```text
 TP8：H=12，Dk=Dv=128，mixed_qkv width=4608
 lower_bound=-5.0，scale=128**-0.5
-state_indices=0 表示 null slot：输出全 0，state 不变
+state_indices<=0 表示 null slot：输出全 0，state 不变
+正 state index 直接索引 initial_state 的 dim0，不做 page-1
 ```

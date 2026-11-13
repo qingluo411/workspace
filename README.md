@@ -1,15 +1,16 @@
 # DLC / TYD 自研 AI 加速芯片软件栈
 
-本仓库群提供 TYD 加速卡的完整推理软件栈：LLVM 编译器、DLCsim、DLCSynapse
+本仓库群提供 TYD 加速卡的完整推理软件栈：LLVM 编译器、CLsim、DLCSynapse
 运行时、DLC_Custom_Kernel 算子库、DLCCL 集合通信、PyTorch DLC 后端，以及
 vLLM / vllm-cl 推理服务插件。
 
 当前已验证的重点模型是 **GLM-5.3-Flash-Mix**。适配、性能优化、NaN 排查和发布
 整理已告一段落，发布代码位于 `vllm`、`vllm-cl`、`DLC_Custom_Kernel`、`pytorch`
-四个仓库的 `release-glm53flash` 分支；设计、验证和交付文档统一归档在
+四个仓库的 `release-glm53flash` / `release-glm53flash-2` / `release-glm53flash-3`
+分支；设计、验证和交付文档统一归档在
 `work-docs/glm53flash`。
 
-> 本文最后更新：2026-10-27。详细启动步骤以
+> 本文最后更新：2026-11-12。详细启动步骤以
 > `work-docs/glm53flash/vllm-cl/docs/glm5_flash/GLM-5.3-Flash_模型服务使用指南_2026-10-23.md`
 > 为准。
 
@@ -17,16 +18,20 @@ vLLM / vllm-cl 推理服务插件。
 
 | 组件 | 分支 | 当前 HEAD | 说明 |
 |---|---|---|---|
-| `vllm` | `release-glm53flash` | `8cfd356105` | DLC vLLM fork；GLM/KDA graph padding 修正 |
-| `vllm-cl` | `release-glm53flash` | `253bd69` | GLM 模型、算子、KV cache、Graph patch 的主要实现 |
-| `DLC_Custom_Kernel` | `release-glm53flash` | `795e8ca3a` | 包含 KDA state pool 地址溢出修复及 GLM 融合算子 |
-| `pytorch` | `release-glm53flash` | `2ff2142cb9` | DLC 后端和 block 校验修复 |
-| `DLCSynapse` | `main` | `37d6c60d` | 运行时；Api_Version_26 |
-| `DLCsim` | `main` | `c6e2808d` | CRT hex 当前为 TYD；源码树中的 hex 为本地生成改动 |
-| `DLC_CL` | `main` | `b4e3423` | DLCCL |
-| `LLVM` | `main` | `2fb2abd9e629` | DLC 编译工具链 |
+| `vllm` | `release-glm53flash` | `13b663fd09` | DLC vLLM fork；GLM/KDA graph padding 修正 |
+| `vllm-cl` | `release-glm53flash` | `10a2fbb` | GLM 模型、算子、KV cache、Graph patch 的主要实现 |
+| `DLC_Custom_Kernel` | `release-glm53flash-3` | `81f8e94a4` | GLM 融合算子、KDA 修复与 KPool #09 优化 |
+| `pytorch` | `release-glm53flash-2` | `8182bdd8c3` | DLC 后端和 block 校验修复 |
+| `DLCSynapse` | `main` | `e230fed5` | 运行时；Api_Version_26 |
+| `CLsim` | `main` | `1e31b57` | 统一模拟器；TYD CRT ABI 3.2.0 |
+| `DLC_CL` | `main` | `bc878f8` | DLCCL |
+| `LLVM` | `main` | `cecb029aa019` | DLC 编译工具链；RT ABI 3.2.0 |
 
-`release-glm53flash` 是当前唯一交付线；早期 bring-up 特性分支只保留作历史记录，
+`DLCsim` 已退出当前构建和运行链，只保留源码仓库与旧安装目录
+`/usr/local/chipltech/simulator.dlcsim-1b0504e2-20261111-092140` 作为回滚参考；
+当前模拟器及 CRT 由 `CLsim` 提供。
+
+`release-glm53flash` 系列（含 `-2` / `-3`）是当前交付线；早期 bring-up 特性分支只保留作历史记录，
 后续修复和新版本应继续提交到 release 分支。GLM 的设计、验证、排障和交付文档统一
 归档在 `work-docs/glm53flash`，不要重新放回 `vllm-cl` 发布分支。
 
@@ -34,6 +39,7 @@ vLLM / vllm-cl 推理服务插件。
 
 - 8 × TYD，`/dev/cltech0..7`。
 - 驱动 `Driver Version_v26.0.1` / `Api_Version_26`。
+- 模拟器已切换到 CLsim `1e31b57`，系统安装的 CRT ABI 为 `3.2.0`。
 - Python 3.10，`/root/workspace/.venv`。
 - 当前工作区全部为 editable 源码安装：`torch 2.5.0`，`torch.dlc.is_available()`
   为 `True`；`torchaudio`/`torchvision` 模块版本分别为 `2.5.0+dlc` /
@@ -169,7 +175,7 @@ blocks_per_request(L) = 69 + 2 × ceil(L / 256)
 | `vllm bench serve` 报 `libcudart.so.13` | 误装了 CUDA 版媒体依赖；安装发布的 DLC `torchaudio`/`torchvision` wheel |
 | Graph 启动失败但 eager 正常 | 去掉 `--compilation-config`、`--kernel-config`，追加 `--enforce-eager` 先验证模型和算子 |
 | 驱动 API 版本不一致 | 安装与 Synapse 匹配的 `Driver Version_v26.0.1`；生产不要用 `DLC_SKIP_VERSION_CHECK=1` 绕过 |
-| `CRT TargetArch mismatch` | 检查 4 个 `dlc_crt*.hex` 头 4 字节是否为 `0TYD`，并确认 `DLC_TPU_VERSION=2`、`LLVM_PATH` 后重建 DLCsim |
+| `CRT TargetArch mismatch` | 检查 4 个 `dlc_crt*.hex` 头 4 字节是否为 `0TYD`，并确认 `DLC_TPU_VERSION=2`、`LLVM_PATH` 后在 `/root/workspace/CLsim` 执行 `./build.sh tyd --clean` |
 
 ## NaN 故障结论
 
@@ -194,9 +200,13 @@ GLM-5.3-Flash 曾出现全 `!` / NaN 输出，最终定位到两个相互独立�
 bash /root/workspace/helper/compile.sh
 ```
 
-该脚本依次构建 LLVM、DLCsim、DLCSynapse、DLC_Custom_Kernel、DLC_CL、pytorch，
+该脚本依次构建 LLVM、CLsim、DLCSynapse、DLC_Custom_Kernel、DLC_CL、pytorch，
 再 editable 安装 vLLM 和 vllm-cl。`helper/update.sh` 会清理并 `git pull origin main`，
 **不要在有未提交发布改动的 release 分支上无检查执行**。
+
+如需验证 CLsim 构建但不覆盖当前系统模拟器，可设置
+`CLSIM_INSTALL_PREFIX=/tmp/clsim-stage`；只有 CLsim 会安装到该 staging 目录，
+其余组件仍按脚本原有路径构建。
 
 当前 wheel 目录：
 
@@ -306,7 +316,8 @@ TORCHVISION_USE_VIDEO_CODEC=0 MAX_JOBS=8 \
 
 ```text
 LLVM/              DLC 编译器工具链
-DLCsim/            指令级模拟器 + TYD CRT 固件
+CLsim/             统一模拟器 + TYD CRT 固件
+DLCsim/            旧模拟器仓库，仅保留回滚，不参与当前构建
 DLCSynapse/        Synapse 运行时、CUDA-like API、Graph、profiler
 DLC_Custom_Kernel/ AOT kernel 库与分发元信息
 DLC_CL/            集合通信 DLCCL

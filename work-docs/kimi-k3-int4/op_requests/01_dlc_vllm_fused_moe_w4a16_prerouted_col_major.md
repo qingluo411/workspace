@@ -83,10 +83,10 @@ def dlc_vllm_fused_moe_w4a16_prerouted_col_major(
     w2_qweight: torch.Tensor,          # [E, I_tp // 8, hidden], int32
     w13_scales: torch.Tensor,          # [E, hidden // 128, 2 * I_tp], BF16
     w2_scales: torch.Tensor,           # [E, I_tp // 128, hidden], BF16
-    topk_weights: torch.Tensor,        # [T, K], BF16/FP32，路由已归一化/缩放
-    topk_ids: torch.Tensor,            # [T, K], int32/int64，-1 表示跳过
+    topk_weights: torch.Tensor,        # [T, K], FP32，路由已归一化/缩放
+    topk_ids: torch.Tensor,            # [T, K], INT32，-1 表示跳过
     *,
-    expert_map: torch.Tensor | None = None,  # [E] int32/int64，global->local，-1 跳过
+    expert_map: torch.Tensor | None = None,  # [E] INT32，global->local；None 表示不做映射
     activation: str = "situ",
     situ_beta: float = 4.0,
     situ_linear_beta: float | None = 25.0,
@@ -105,9 +105,18 @@ def dlc_vllm_fused_moe_w4a16_prerouted_col_major(
 - `w2_qweight`：`[E, I_tp/8, hidden]` int32。
 - `w13_scales` / `w2_scales`：BF16，分别沿 gate/up 输出维和 hidden 输出维广播；
   每 128 个输入元素一个 scale。
-- `topk_weights`：`[T, K]`；已是最终路由权重，算子不再 renormalize。
-- `topk_ids`：`[T, K]`；全局 expert id；`-1` 表示该 route 无效。
-- `expert_map`：可选；`expert_map[global_id]` 为本地 expert id，`-1` 表示该 rank 不持有。
+- `topk_weights`：`[T, K]` FP32；K3 直接来自 `fused_grouped_topk`。已是最终路由
+  权重，算子不再 renormalize。`topk_weights[t, r]` 是 `topk_ids[t, r]` 对应 expert
+  输出的乘法系数：它由所选 expert 的 router score 得到，并已在上游完成可选的
+  top-k renormalize 和 routed scaling；因此不保证 `sum_r(topk_weights[t, r]) == 1`，
+  也不是 router logits。重复 expert 的不同 route 各用自己的权重分别累加。
+- `topk_ids`：`[T, K]` INT32；全局 expert id；`-1` 表示该 route 无效。不接收
+  int64 变体。`topk_ids=-1` 时跳过该 route，忽略对应 `topk_weights`。
+- `expert_map`：可选，INT32。
+  - 未开启 expert parallel（当前 TP8 生产路径）时传入 `None`；此时 `topk_ids` 可直接
+    作为本地 expert id，benchmark 必须覆盖该路径。
+  - 开启 expert parallel 时传入 `[E]` INT32 映射；`expert_map[global_id]` 为本地
+    expert id，`-1` 表示该 rank 不持有该 expert。
 
 以上 top-k 和 expert map 必须是 device tensor；kernel/wrapper 禁止 `.cpu()`、`.item()`、
 `.tolist()` 或 numpy 转换。
@@ -192,7 +201,8 @@ for token t in 0..T-1:
 - `group_size = 128`，symmetric INT4，无 zero point；
 - `hidden_states`/输出/scales：BF16；
 - packed weight：int32；
-- `topk_weights`：BF16 或 FP32，`topk_ids`：int32 或 int64；
+- `topk_weights`：FP32；`topk_ids`：INT32；不做隐式 dtype 转换；
+- `expert_map`：可选 INT32；`None`（EP off）和完整 device map（EP on）都必须支持；
 - 单卡 DLC；不包含 TP collective；
 - 支持 eager，目标支持 DLC Graph capture/replay。
 - 内部 grouped-token scratch 必须由持久 workspace/预分配 buffer 提供，不能在每次调用中做
@@ -260,9 +270,10 @@ Golden / reference 实现：
 1. 功能：`T ∈ {1,8,64,256,4096}`，`E=896`，`K=16`，`hidden=3584`，`I_tp=384`；
    与 native reference 对齐。
 2. 边界：`T=0`；所有 `topk_ids=-1`；部分 route 无效；重复 expert；全 0 weight/scale。
-3. `expert_map`：全 local、稀疏 local map、含 -1。
+3. `expert_map`：`None`（EP off）、全 local、稀疏 local map、含 -1。
 4. layout：真实 checkpoint packed layout；确认不能套用 AWQ reverse-order。
-5. 异常：越界 expert id、packed dim 不匹配、scale group 不匹配、未知 activation。
+5. 异常：越界 expert id、packed dim 不匹配、scale group 不匹配、未知 activation；
+   `topk_weights` 非 FP32 或 `topk_ids` 非 INT32 时报错。
 6. 性能：
    - 单次 `T=1`、K=16 的 selected-expert 计算目标 ≤ 4 ms/层；
    - 24 层切片 `T=1` 的 MoE 部分目标 ≤ 100 ms，解锁 1 token 秒级请求；
@@ -367,6 +378,8 @@ def fused_moe_w4a16_prerouted_reference(
     situ_linear_beta: float | None = 25.0,
 ) -> torch.Tensor:
     """Reference for one rank's local expert shard."""
+    assert topk_weights.dtype == torch.float32
+    assert topk_ids.dtype == torch.int32
     tokens, hidden = hidden_states.shape
     intermediate = w2_qweight.shape[1] * 8
     output = torch.zeros(

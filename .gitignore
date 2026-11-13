@@ -11,13 +11,16 @@ wheels/
 
 # Independently managed nested repositories
 /LLVM/
-/DLCsim/
+/CLsim/
 /DLCSynapse/
 /DLC_Custom_Kernel/
 /DLC_CL/
 /pytorch/
 /vllm/
 /vllm-cl/
+
+# Legacy simulator retained for rollback; not part of the active build.
+/DLCsim/
 /log/
 *.so
 *.whl

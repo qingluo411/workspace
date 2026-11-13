@@ -2,7 +2,7 @@ cd /root/workspace/LLVM
 git restore .
 git clean -fd
 git pull origin main
-cd /root/workspace/DLCsim
+cd /root/workspace/CLsim
 git restore .
 git clean -fd
 git pull origin main

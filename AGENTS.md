@@ -3,7 +3,7 @@
 > 本文档用于快速回忆本仓库群（`/root/workspace`）的全貌：芯片、分层架构、
 > 各仓库职责、构建顺序、运行时调用链与当前环境状态。
 >
-> 最后更新：2026-11-10。当前重点是 **GLM-5.3-Flash-Mix** 的
+> 最后更新：2026-11-12。当前重点是 **GLM-5.3-Flash-Mix** 的
 > `release-glm53flash` 发布线；仓库 HEAD、驱动、发布结论和文档入口见下表与第 7/8 节。
 > 根仓库的文档/测试追踪策略见第 10.1 节。
 > 面向人阅读的项目总览见根目录 `README.md`。
@@ -13,7 +13,7 @@
 ## 0. 一句话总览
 
 这是一个 **类 Habana Gaudi / CUDA 风格** 的自研 AI 加速芯片软件栈：
-自研 LLVM 后端负责把 kernel 编成芯片二进制 → DLCsim 提供指令级模拟器与 CRT 固件 →
+自研 LLVM 后端负责把 kernel 编成芯片二进制 → CLsim 提供指令级模拟器与 CRT 固件 →
 DLCSynapse 是运行时核心（CUDA-like `dlc_*` API + Graph `synapse_*` API）→
 PyTorch 以 `device='dlc'` 接入 → vLLM 通过硬件插件跑推理。
 
@@ -67,7 +67,7 @@ PyTorch 以 `device='dlc'` 接入 → vLLM 通过硬件插件跑推理。
 │               dlc_runtime      → libdlc_runtime.so            │
 │               （提供 CUDA-like dlc_* API + Graph synapse_*）  │
 ├─────────────────────────────────────────────────────────────┤
-│  模拟器       DLCsim           → libsimulator.so + CRT hex    │
+│  模拟器       CLsim            → libsimulator.so + CRT hex    │
 │  编译器       LLVM (dlc target) → clang/ld.lld/llvm-mc/elf2hex │
 ├─────────────────────────────────────────────────────────────┤
 │  用户态驱动   libhl-thunk.so (DLCSynapse/dlc_thunk)           │
@@ -90,28 +90,31 @@ PyTorch 以 `device='dlc'` 接入 → vLLM 通过硬件插件跑推理。
 
 | 仓库 | 分支 | HEAD | 职责 / 当前状态 |
 |---|---|---|---|
-| **LLVM** | `main` | `2fb2abd9e629` | DLC TPU 编译器后端（`--target=dlc`、`-mcpu=dlc-gen2`、`-std=dc99`） |
-| **DLCsim** | `main` | `c6e2808d` | 指令级模拟器 + CRT；`lib-rt/*.hex` 为本地 TYD 生成改动，未提交 |
-| **DLCSynapse** | `main` | `37d6c60d` | Synapse 运行时、Graph、内存、profiler、用户态驱动 |
-| **DLC_Custom_Kernel** | `release-glm53flash` | `795e8ca3a` | AOT kernel 库；包含 GLM 融合算子与 KDA 地址溢出修复 |
-| **DLC_CL** | `main` | `b4e3423` | DLCCL 集合通信 |
-| **pytorch** | `release-glm53flash` | `2ff2142cb9` | `device='dlc'` 后端；包含 block 校验修复 |
-| **vllm** | `release-glm53flash` | `8cfd356105` | vLLM DLC fork；KDA graph padding 修正 |
-| **vllm-cl** | `release-glm53flash` | `253bd69` | GLM 模型、算子、KV cache、Graph patch 主实现；工作区仅 `vllm_cl/_version.py` 为生成式改动 |
+| **LLVM** | `main` | `cecb029aa019` | DLC TPU 编译器后端（`--target=dlc`、`-mcpu=dlc-gen2`、`-std=dc99`）；RT ABI 3.2.0 |
+| **CLsim** | `main` | `1e31b57` | 统一模拟器；DLC/TYD 共用 `targets/dlc`，TYD CRT ABI 3.2.0 |
+| **DLCSynapse** | `main` | `e230fed5` | Synapse 运行时、Graph、内存、profiler、用户态驱动 |
+| **DLC_Custom_Kernel** | `release-glm53flash-3` | `81f8e94a4` | AOT kernel 库；GLM 融合算子、KDA 修复与 KPool #09 优化 |
+| **DLC_CL** | `main` | `bc878f8` | DLCCL 集合通信 |
+| **pytorch** | `release-glm53flash-2` | `8182bdd8c3` | `device='dlc'` 后端；包含 block 校验修复 |
+| **vllm** | `release-glm53flash` | `13b663fd09` | vLLM DLC fork；KDA graph padding 修正 |
+| **vllm-cl** | `release-glm53flash` | `10a2fbb` | GLM 模型、算子、KV cache、Graph patch 主实现；工作区仅 `vllm_cl/_version.py` 为生成式改动 |
+
+> `DLCsim` 已退出当前构建和运行链，仅保留仓库及
+> `/usr/local/chipltech/simulator.dlcsim-1b0504e2-20261111-092140` 备份用于回滚。
 
 > 上表嵌套组件仓库的 remote 均为 `git@github.com:ChipLTech/<repo>.git`；
 > 根 `workspace` 仓库是本地 Git 仓库，当前未配置 remote。
 > `torchaudio-2.5/`、`torchvision/` 为 DLC 媒体依赖源码，发布 wheel 已在
 > `wheelhouse-glm53flash/`；不要用 PyPI 的 CUDA 版覆盖。
 >
-> `release-glm53flash` 是当前唯一交付线；早期 bring-up 特性分支只作历史参考。
+> `release-glm53flash` 系列（含 `-2` / `-3`）是当前交付线；早期 bring-up 特性分支只作历史参考。
 > 新修复继续提交到 release 分支，模型文档继续归档在 `work-docs/glm53flash`；
 > 其中的纯文档/源码由根仓库追踪。
 
 ### 官方依赖图（`DLC_Custom_Kernel/README.md`）
 
 ```
-LLVM ──┬─→ DLCsim ──┬─→ DLCSynapse ──┬─→ DLC_Custom_Kernel ──┐
+LLVM ──┬─→ CLsim  ──┬─→ DLCSynapse ──┬─→ DLC_Custom_Kernel ──┐
        │            │               ├─→ DLC_CL              ├─→ pytorch ─→ vllm ─→ vllm-cl
        └────────────┴───────────────┘                       │
 DLC-Kernel-Driver ─────────────────→ DLCSynapse              ┘
@@ -132,7 +135,9 @@ bash /root/workspace/helper/compile.sh   # 全栈源码构建 + pytorch develop 
 bash /root/workspace/helper/check_status.sh
 ```
 
-- `helper/compile.sh`：日常源码重建入口。
+- `helper/compile.sh`：日常源码重建入口；设置
+  `CLSIM_INSTALL_PREFIX=/tmp/clsim-stage` 可把 CLsim 安装到 staging，避免覆盖当前
+  系统模拟器。
 - `helper/update.sh`：拉取各仓库 `main` 的辅助脚本；会清理工作区，不适合 release
   分支直接执行。
 - `helper/get_package.sh`：打包 recipe，需调用者提供 `DLC_INC`、`PY`、
@@ -175,7 +180,7 @@ CMAKE_BUILD_TYPE=Release COMPILE_CUSTOM_KERNELS=1 \
 
 | 组件 | 安装前缀 |
 |---|---|
-| DLCsim | `/usr/local/chipltech/simulator` |
+| CLsim | `/usr/local/chipltech/simulator` |
 | DLCSynapse | `/usr/local/chipltech/synapse` |
 | DLC_CL | `/usr/local/chipltech/dlccl` |
 | DLC_Custom_Kernel | 安装到 `/usr/local/chipltech/synapse/lib` |
@@ -228,13 +233,13 @@ torch.ones(5, device='dlc')
 
 ### 5.2 CRT 固件与 TargetArch 标记（排错必读）
 
-- CRT = 每颗核启动时执行的引导代码，源码在 `DLCsim/lib-rt/`（`crt0.S`、`crt0_xys1.S`、`crt_sync.S`…），
+- CRT = 每颗核启动时执行的引导代码，源码在 `CLsim/targets/dlc/lib-rt/`（`crt0.S`、`crt0_xys1.S`、`crt_sync.S`…），
   编出 **4 个 hex**：`dlc_crt.hex`、`dlc_crt_xys1.hex`、`dlc_crt_cmem.hex`、`dlc_crt_cmem_xys1.hex`。
 - hex 头 4 字节是 **TargetArch 标记**：
   - `0DLC` → DLC（TargetArch=1）
   - `0TYD` → TYD（TargetArch=2）
   - `0HHP` → HHP（TargetArch=3）
-- 标记由 `DLCsim/lib-rt/crt0.S` 中的 `DLC_TPU_VERSION` 宏控制：
+- 标记由 `CLsim/targets/dlc/lib-rt/crt0.S` 中的 `DLC_TPU_VERSION` 宏控制：
   `DLC_TPU_VERSION=1` 生成 `0DLC`，`=2` 生成 `0TYD`，`=3` 生成 `0HHP`。
 - 初始化时 `DLCSynapse/synapse_core/synapse_core.cpp:243 CheckCrtTargetArch()`
   会把 CRT 标记与真实芯片（`hlthunk` 返回的设备名）比对，不一致直接报错：
@@ -242,13 +247,13 @@ torch.ones(5, device='dlc')
   CRT TargetArch mismatch: current real device chip is TYD (TargetArch=2),
   but .../dlc_crt.hex was built for DLC (TargetArch=1)
   ```
-- **常见坑**：DLCsim 的 CRT 只有在该仓库 CMake 配置时能看到 `LLVM_PATH`
-  （`DLCsim/CMakeLists.txt:40-45`）才会重新生成；否则静默跳过，只重装旧的 hex。
+- **常见坑**：CLsim 的 CRT 只有在该仓库 CMake 配置时能看到 `LLVM_PATH`
+  （`CLsim/common/cmake/CLsimCommon.cmake`）才会重新生成；否则会使用旧 prebuilt 镜像。
   → 重新编译 CRT 必须确保：
   ```bash
   export LLVM_PATH=/root/workspace/LLVM
   export DLC_TPU_VERSION=2       # 目标 TYD
-  cd /root/workspace/DLCsim && rm -rf build && ./build.sh
+  cd /root/workspace/CLsim && ./build.sh tyd --clean
   ```
   验证：
   ```bash
@@ -256,7 +261,7 @@ torch.ones(5, device='dlc')
     printf '%s: ' "$f"; head -c 4 /usr/local/chipltech/simulator/lib/$f; echo
   done   # 应输出 0TYD
   ```
-- **RTABI 版本**：`dlc_crt.rtabi = 3.0.0`，clang 内建也报 "DLC RT ABI version: 3.0.0"，
+- **RTABI 版本**：`dlc_crt.rtabi = 3.2.0`，clang 内建也报 "DLC RT ABI version: 3.2.0"，
   用于编译期/运行期 ABI 对齐（`DLCSynapse/synapse_backend/utils/rtabi_version.*`）。
 
 ### 5.3 DLCSynapse 关键源码位置（`DLCSynapse/`）
@@ -286,7 +291,7 @@ torch.ones(5, device='dlc')
 | `LD_LIBRARY_PATH` | `dlccl/lib : simulator/lib : synapse/lib : kernel : bluejay/build` |
 | `CUSTOM_KERNEL_PATH` | `/usr/local/chipltech/synapse/lib` |
 | `DLCKERNELDRIVER_PATH` | `/work/`（内核驱动 `chipltech.ko` 所在） |
-| `DLC_SYN_USE_SIM` | `1` → 用 DLCsim 而非真机（隐含 `DLC_SYN_BLOCKING=1`） |
+| `DLC_SYN_USE_SIM` | `1` → 用 CLsim 而非真机（隐含 `DLC_SYN_BLOCKING=1`） |
 | `DLC_SYN_BLOCKING` | 阻塞所有 `dlc_runtime_api` 调用 |
 | `DLC_SYN_DEBUG` / `DLC_SYN_VERBOSE` | 日志；`VERBOSE=3` 打印算子参数 |
 | `DLC_SKIP_VERSION_CHECK` | 生产必须为 `0`；仅隔离旧镜像临时设为 `1` |
@@ -295,17 +300,17 @@ torch.ones(5, device='dlc')
 | `VLLM_USE_DLC_COL_MAJOR_MATMUL` | `1` = 使用适配 checkpoint 的 column-major linear 路径 |
 | `PYTORCH_DLC_ALLOC_CONF` | `expandable_segments:True`；缓解 Mamba/MLA 交错分配碎片 |
 | `VLLM_LOGGING_LEVEL` | 生产默认 `INFO`，避免 DEBUG 日志淹没 |
-| `DLC_SIM_ENHANCED_*` / `DLC_SIM_ENABLE_*` | 模拟器各类调试打印（见 `DLCsim/setenv.sh` 全表） |
+| `DLC_SIM_ENHANCED_*` / `DLC_SIM_ENABLE_*` | 模拟器各类调试打印（见 `CLsim/docs/environment.md`） |
 
 > 注意：`.bashrc` 与 `/etc/environment` 不一致会导致交互/非交互行为不同。
 
 ---
 
-## 7. 当前环境状态（发布基线：2026-10-27）
+## 7. 当前环境状态（更新：2026-11-12）
 
 | 组件 | 状态 |
 |---|---|
-| LLVM / DLCsim / DLCSynapse / DLC_CL | 已构建并安装；DLCsim CRT 为 TYD |
+| LLVM / CLsim / DLCSynapse / DLC_CL | 已构建并安装；CLsim CRT 为 TYD，RTABI 3.2.0 |
 | DLC_Custom_Kernel | 已构建并安装，`libcustom_dlc_perf_lib.so` 约 1.4 GB |
 | pytorch | 已 editable 安装；`import torch` 正常，`torch 2.5.0`，DLC 后端可用 |
 | vLLM / vllm-cl | editable 源码安装；交付 wheel 版本 `0.30.1rc0+dlc`，V1 runner |
@@ -325,7 +330,8 @@ torch.ones(5, device='dlc')
 - 2026-11-10：根仓库已将 `work-docs/`、`work-tests/` 的纯文档与源码纳入追踪
   （提交 `54ab87e`，215 个文件、约 3.85 MiB）；日志、测量结果、trace、压缩包和
   张量数据仍忽略。当前根仓库共追踪 231 个文件、约 4.07 MiB。
-- 本地生成改动：`DLCsim/lib-rt/*.hex`、`vllm-cl/vllm_cl/_version.py`；提交前应确认是否需要纳入。
+- 模拟器当前安装版本为 CLsim `1e31b57`；clang 与 custom kernel 均为 RTABI 3.2.0。
+- 本地生成改动：`vllm-cl/vllm_cl/_version.py`；提交前应确认是否需要纳入。
 
 ---
 
@@ -445,7 +451,8 @@ KV cache 容量和 `FULL_DECODE_ONLY`。
 | 真机连不上 | `ls /dev/cltech*`、`lsmod \| grep chipltech`、`cat /sys/devices/virtual/chipltech/cltech0/version` |
 | kernel 未生效/回退 CPU | `dlc_src/enabled_kernels.hpp` 的 `DispatchType`、`libcustom_dlc_perf_lib.so` 是否最新 |
 | 想只用模拟器 | `export DLC_SYN_USE_SIM=1` |
-| 性能/时序分析 | `synapse_perf/syn_perf` + `DLCsim/profiler` |
+| 看不到 `RT ABI compatible` | 纯模拟器会跳过 RTABI 检查；真机需 `DLC_SYN_USE_SIM=0 DLC_SYN_VERBOSE=1 HL_DEBUG_LEVEL=DEBUG`，并用 `dlc_crt.rtabi` 与 kernel `RTABIVersion` 复核 |
+| 性能/时序分析 | `synapse_perf/syn_perf` + `CLsim/targets/dlc/profiler` |
 | GLM 输出全 `!` / NaN | 先读 NaN SOP；检查 KDA 64 位地址修复是否已编进 kernel，warmup 后是否重新清零 sparse MLA block 0 |
 | Graph 启动失败 / `query_start_loc must cover` | 检查 vLLM KDA/GDN padding 修复、KPool #19 持久 slots、graph bucket padding |
 | `vllm bench serve` 报 `libcudart.so.13` | 安装 DLC `torchaudio/torchvision` wheel，不要用 CUDA 版；临时可加 compat PYTHONPATH |
@@ -457,8 +464,9 @@ KV cache 容量和 `FULL_DECODE_ONLY`。
 ## 10. 目录速查（`/root/workspace`）
 
 ```
+CLsim/             统一模拟器（targets/dlc 供 DLC/TYD，targets/hhp 供 HHP）
+DLCsim/            旧模拟器仓库，仅保留回滚，不参与当前构建/运行
 DLCSynapse/        运行时核心（synapse_core / synapse_backend / dlc_runtime / dlc_thunk / synapse_perf）
-DLCsim/            模拟器 + CRT + server（lib-rt/、device/、src/xys、profiler/）
 DLC_Custom_Kernel/ 2686 个 AOT kernel（dlc_kernels/）+ 分发元信息（dlc_src/）
 DLC_CL/            集合通信 DLCCL
 LLVM/              DLC 编译器工具链（dlc target）
@@ -479,10 +487,10 @@ README.md          项目总览与 GLM 发布状态
 ### 10.1 根仓库与文档/测试追踪
 
 `/root/workspace` 自身是一个本地 `master` Git 仓库，当前未配置 remote。它管理顶层
-编排文件、`work-docs/` 和 `work-tests/`；`LLVM/`、`DLCsim/` 等嵌套组件仍是独立
+编排文件、`work-docs/` 和 `work-tests/`；`LLVM/`、`CLsim/` 等嵌套组件仍是独立
 仓库，由根 `.gitignore` 排除。
 
-截至 2026-11-10：
+截至 2026-11-12：
 
 - 根仓库追踪 231 个文件、约 4.07 MiB；其中 `work-docs/` 182 个、`work-tests/` 33 个，
   合计 215 个、约 3.85 MiB。文档/源码纳入提交为 `54ab87e`。

@@ -1,11 +1,16 @@
 export LD_LIBRARY_PATH=/usr/local/chipltech/dlccl/lib:/usr/local/chipltech/simulator/lib:/usr/local/chipltech/synapse/lib:/usr/local/chipltech/kernel:/usr/local/chipltech/bluejay/build:${LD_LIBRARY_PATH:-}
 export CUSTOM_KERNEL_PATH=/usr/local/chipltech/synapse/lib
+export LLVM_PATH=${LLVM_PATH:-/root/workspace/LLVM}
+export DLC_TPU_VERSION=2
 cd /root/workspace/LLVM
 rm -rf build/
 ./build.sh
-cd /root/workspace/DLCsim
-rm -rf build/
-./build.sh
+cd /root/workspace/CLsim
+if [ -n "${CLSIM_INSTALL_PREFIX:-}" ]; then
+  ./build.sh tyd --clean --install-prefix "${CLSIM_INSTALL_PREFIX}"
+else
+  ./build.sh tyd --clean
+fi
 cd /root/workspace/DLCSynapse
 rm -rf build/
 ./compile.sh

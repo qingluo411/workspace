@@ -8,7 +8,7 @@ set -u -o pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 WORKSPACE_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd -P)
 
-KNOWN_REPOS=(LLVM DLCsim DLCSynapse DLC_Custom_Kernel DLC_CL pytorch vllm vllm-cl)
+KNOWN_REPOS=(LLVM CLsim DLCSynapse DLC_Custom_Kernel DLC_CL pytorch vllm vllm-cl)
 FETCH_REMOTE=1
 FETCH_TIMEOUT=20
 VERBOSE=0
