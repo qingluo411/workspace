@@ -28,5 +28,6 @@ USE_CUDA=0 DEBUG=0 python3 setup.py develop
 
 # vllm
 cd /root/workspace/
-VLLM_TARGET_DEVICE=empty uv pip install -v -e vllm --no-build-isolation
-uv pip install -v -e vllm-cl --no-build-isolation
+export VLLM_TARGET_DEVICE=empty
+uv pip install -v --no-deps -e vllm --no-build-isolation
+uv pip install -v --no-deps -e vllm-cl --no-build-isolation
