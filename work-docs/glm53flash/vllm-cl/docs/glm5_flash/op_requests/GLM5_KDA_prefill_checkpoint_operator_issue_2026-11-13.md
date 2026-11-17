@@ -1,4 +1,4 @@
-# [Operator Request] GLM-5.3-Flash KDA prefill checkpoint state export
+# [Operator Request] GLM-5.3-Flash KDA prefill checkpoint state export（prefix cache + MTP）
 
 > 本 issue 为自包含版本，可直接粘贴到 GitHub；正文中的接口、reference、测试数据和日志均已内嵌。
 
@@ -13,6 +13,9 @@ P1
 ## 目标版本与期望时间
 
 `DLC_Custom_Kernel` `release-glm53flash-3` 后续版本；期望 `2026-11-20`
+
+本 issue 将普通 target prefill 与 MTP target prefill 的 KDA checkpoint 作为同一组
+API 交付；MTP drafter 的第 45 层 sparse MLA/KPool cache 不在本 issue 范围内。
 
 ## 算子名称
 
@@ -67,7 +70,36 @@ GLM-5.3-Flash 的 KDA linear-attention 层在 prefix caching 下需要复用两�
 - `checkpoint_offsets=None` 时保持现有调用、输出和性能行为；
 - 支持 batch 内不同序列使用不同 offset；`0` 表示不导出。
 
-非目标：不改变 KDA 数值公式、不负责把 state 写入 paged KV cache、不实现 MTP/spec-decode checkpoint。
+### MTP + prefix cache 场景（2026-11-16 补充）
+
+MTP 与 prefix cache 同时开启时，目标模型的 KDA prefill 还需要在 **query 内部** 导出
+checkpoint。固定 4096-token prompt、`block_size=256`、
+`max_num_batched_tokens=4096`、MTP `num_speculative_tokens=1`、prefix cache 开启时，
+实际调度为：
+
+```text
+第 1 次请求：3840 + 256 token，没有导出 3584 checkpoint
+第 2 次请求：3584 + 256 + 256 token，没有命中，但发现 shared-prefix junction
+第 3 次请求：只计算最后 256 + 256 token，命中 3584
+```
+
+当前框架在 MTP 打开时不会给 KDA spec 设置 `num_prefill_checkpoint_blocks`，原因是
+`get_kv_cache_spec()` 只要看到 `speculative_config is not None` 就直接返回原始 spec。
+因此第一次请求没有 3584 的 recurrent/conv checkpoint；第二次请求只能依靠
+full-attention 的 3584 前缀发现 shared-prefix junction，补写一次 checkpoint；第三次
+才形成完整命中。这个时序不是 prefix cache 的随机行为，而是 MTP 下 checkpoint
+能力缺失。
+
+本 issue 的目标因此扩展为：**同一组 KDA prefill checkpoint 能力必须能用于 MTP
+target 的 KDA prefill 路径**。MTP drafter（GLM5 的第 45 层 sparse MLA/KPool）的
+KV cache、proposal/acceptance 逻辑不在本 issue 范围内。算子本身不需要新增
+MTP 专用 kernel，但必须支持与 MTP target prefill 相同的 `query_start_loc`、
+batch 行和 `checkpoint_offsets` 调用语义；draft token 不进入 KDA target prefill 的
+query 行。
+
+非目标：不改变 KDA 数值公式、不负责把 state 写入 paged KV cache、不负责 MTP
+drafter 的 sparse MLA/KPool cache，也不负责 speculative acceptance/rejection。
+目标模型 KDA 层在 MTP 路径中的 checkpoint 属于本 issue 范围。
 
 ## 现有算子接口（当前实现复制）
 
@@ -145,11 +177,19 @@ out = torch.dlc_kda_causal_conv_prefill(
 
 输出 `out [1,T,H,Dv] BF16`、`final_state [B,H,Dv,Dk] FP32`；`checkpoint_state` 由调用者传入并被原地填充。
 
+MTP 场景下 `B` 仍是本次 KDA target prefill 的有效 query 行数，`query_start_loc`
+是这些行的权威边界；`checkpoint_offsets[b]` 相对该行 query start 计算。算子不得
+依赖 `num_speculative_tokens`、draft token 或接受/拒绝结果来决定 checkpoint 语义。
+同一次调用中允许部分行带 checkpoint、部分行 `offset=0`。
+
 ### `dlc_kda_causal_conv_prefill`
 
 输入沿用现有参数；新增 `checkpoint_offsets` int32 `[B]` 和 `checkpoint_state`。
 `checkpoint_state` 的形状与现有 conv state 单页槽位一致，建议 `[B, conv_dim, width]`
 或 `[B, width, conv_dim]`，最终以现有 state layout 为准。
+
+conv checkpoint 是 query 内部某 token offset 后的卷积滑动窗口快照；MTP target
+prefill 与普通 target prefill 使用同一语义，不把 draft token 的 conv state 计入。
 
 ## 功能语义
 
@@ -185,7 +225,11 @@ chunk_prefill(start + offset, end)   -> final_state
 - `q/k/v/raw_g` BF16，recurrent state FP32；
 - conv state dtype 与现有 cache dtype 一致（当前 GLM5 为 BF16，允许 FP32 变体）；
 - `checkpoint_offsets` 为 int32；`checkpoint_state` 的布局、stride 和 512B 对齐要求需在 API 文档中明确；
-- 不支持 MTP/spec-decode checkpoint，可返回 `NotImplementedError`。
+- MTP target prefill：至少覆盖 `num_speculative_tokens=1`，KDA target query 的
+  `checkpoint_offsets` 可非零；MTP draft token 不进入本算子；
+- 不要求 MTP drafter 的 KV/KPool checkpoint；该部分由独立方案覆盖；
+- MTP 场景下 `checkpoint_offsets=None` 仍必须保持 `out` / `final_state` 与当前
+  target prefill 路径一致。
 
 ## 精度要求
 
@@ -210,6 +254,15 @@ conv state 的 reference 语义为：对 `[0, offset]` 前缀运行现有 conv p
 - conv state 与两段 split 结果逐元素一致，或满足当前 conv 输出约定；
 - `checkpoint_offsets=None` 时原有 `out/final_state` 对拍不得回退。
 
+以上 `<= 2e-2` 只作为算子数值门槛，不能单独证明端到端 greedy 等价。最终验收还要
+求 checkpoint state 与“只对前缀运行的同一算子 final state”逐 bit 或至多 1 个 FP32 ULP
+一致；若暂时达不到逐 bit，至少必须同时满足：
+
+- 4096-token prompt 的 `offset=3584` checkpoint 可由第一次请求稳定导出；
+- 同一 prompt 的第二次请求能命中 3584，冷/热 greedy 输出完全一致；
+- MTP `num_speculative_tokens=1` 在同一 prompt、同一 chunk 配置下，checkpoint 导出
+  开启与关闭的 greedy 输出一致。
+
 ## 测试范围
 
 - [ ] 基本功能与 reference 对齐
@@ -218,6 +271,8 @@ conv state 的 reference 语义为：对 `[0, offset]` 前缀运行现有 conv p
 - [ ] offset=0、非 checkpoint 路径
 - [ ] 64-token 对齐、非对齐非法输入
 - [ ] 4096/65536 长序列
+- [ ] MTP target prefill，`num_speculative_tokens=1`，`offset=3584/65280`
+- [ ] MTP prefix-cache 重复请求：首次导出、第二次命中、冷热输出一致
 - [ ] 多卡/分布式（只要求 TP 编译通过）
 - [ ] 性能基准与性能回归
 
@@ -230,8 +285,28 @@ B=2, lens=[4096, 7168], offsets=[3840, 6912]
 B=4, lens=[7168, 4096, 2048, 1024], 混合 offset
 B=1, T=256, offset=64
 B=1, offset=0
+MTP B=1, T=4096, offset=3584（num_speculative_tokens=1）
+MTP B=1, T=65536, offset=65280（num_speculative_tokens=1）
+MTP B=2, lens=[4096, 7168], offsets=[3584, 6912]
 非法：offset<0、offset>=length、checkpoint_state shape/dtype 错误
 ```
+
+MTP 端到端复现配置：
+
+```text
+max_model_len=8192
+block_size=256
+max_num_batched_tokens=4096
+max_num_seqs=1
+enable_prefix_caching=True
+mamba_cache_mode=align
+enable_mamba_shared_prefix_checkpoint=True
+speculative_config={"method":"mtp","num_speculative_tokens":1}
+```
+
+期望在框架配套启用 MTP checkpoint gate 后：第一次 4096-token 请求导出 3584
+checkpoint；第二次相同 prompt 直接命中 3584，不再经历
+`3840+256 -> 3584+256+256 -> 256+256` 的三次收敛。
 
 性能要求：
 
@@ -258,7 +333,10 @@ DLC_Custom_Kernel：release-glm53flash-3 / 59e9f0788995cf09bc757f7407925c0848469
 - [ ] checkpoint recurrent state 与 prefix reference 对齐
 - [ ] 无 checkpoint 时输出、final state 和性能不回退
 - [ ] B=1、B>1、混合 offset、64K 长序列测试通过
+- [ ] MTP target prefill 的 `offset=3584/65280` checkpoint 测试通过
+- [ ] MTP prefix-cache 首次导出、第二次命中、冷热 greedy 输出一致
 - [ ] 提供 `B=1,T=65536` 性能数据
+- [ ] 提供 `MTP B=1,T=4096,offset=3584` 的单 kernel 与端到端数据
 - [ ] 新增/更新文档、pytorch_test 和 syntest，并可由 CI 复现
 
 ## 当前框架侧临时验证（内嵌日志）
@@ -293,8 +371,39 @@ Iteration(31): 1 context requests, 1024 context tokens
 64K 首次请求经过了 `L-256` checkpoint 的 split 补写路径；第二次请求只重新计算
 最后 256 token。该结果只验证 split fallback，不代表原生算子性能。
 
+### MTP target 时序证据（2026-11-16）
+
+同一台 TYD 8 卡机器，配置为 `max_model_len=8192`、`max_num_batched_tokens=4096`、
+`block_size=256`、`max_num_seqs=1`、prefix cache 开启、`mamba_cache_mode=align`、
+`enable_mamba_shared_prefix_checkpoint=True`、MTP
+`num_speculative_tokens=1`、`FULL_DECODE_ONLY` graph。固定 4096-token prompt 连续发送
+三次，观察到的 scheduler 日志为：
+
+```text
+第 1 次：Iteration(0): 3840 context tokens
+          Iteration(1):  256 context tokens
+          prefix cache hit: 0
+
+第 2 次：Iteration(20): 3584 context tokens
+          Iteration(21):  256 context tokens
+          Iteration(22):  256 context tokens
+          prefix cache hit: 0，但发现 shared-prefix junction=3584
+
+第 3 次：Iteration(61):  256 context tokens
+          Iteration(62):  256 context tokens
+          prefix cache hit: 3584
+```
+
+代码侧原因是 MTP 打开时 `get_kv_cache_spec()` 不给 KDA spec 增加
+`num_prefill_checkpoint_blocks`；因此第 1 次没有 3584 checkpoint，不能仅靠框架参数
+消除时序。`--prefix-cache-retention-interval 256` 复核仍为 0/0/3584，不能替代
+checkpoint 输出。算子 API 落地后，框架侧还需要把 MTP target 的 checkpoint gate
+打开；建议本 issue 的验收同时覆盖“算子 API 可用”和“框架第一次请求可导出、第二次
+请求可命中”两个层次。
+
 ## 备注
 
 框架侧当前可先用 split fallback 验证 `L-256` checkpoint；本 issue 的目标是提供原生
 checkpoint 输出，从而删除 split fallback、支持 batch，并避免重复 prefill。split fallback
-只作为正确性参考和临时验证路径，不作为最终性能方案。
+只作为正确性参考和临时验证路径，不作为最终性能方案。MTP target KDA prefill 的
+checkpoint 已纳入本 issue；MTP drafter 的 sparse MLA/KPool cache 仍需独立需求覆盖。

@@ -827,3 +827,321 @@ eager 支配，graph 主要影响 decode。
 - 并发语义结果：`work-tests/mtp/results/mtp_graph_20261113/concurrency_semantic_mtp_graph_4k_rounds2.json`
 - 长上下文语义结果：`work-tests/mtp/results/mtp_graph_20261113/long_context_semantic_mtp_graph.json`
 
+### 10.8 MTP + prefix cache 联调记录（2026-11-16）
+
+#### 10.8.1 启动兼容性修复
+
+当前 vLLM 已移除旧版 `mamba_utils.postprocess_mamba`，而 DLC V1 runner 仍在
+`dlc_model_runner.py::_update_states_after_model_execute()` 中调用该入口。MTP +
+prefix cache 启动时，8 个 worker 均在第一次 decode 前报：
+
+```text
+AttributeError: module 'vllm.v1.worker.mamba_utils' has no attribute 'postprocess_mamba'
+```
+
+已在 `vllm-cl/vllm_cl/patch/patch_mamba_state_copy.py` 增加
+`_postprocess_mamba_compat()`：
+
+- 保留旧版 align-mode postprocess 的 per-request bookkeeping；
+- 复用 DLC 的 eager `_collect_mamba_copy_meta()` / `_do_mamba_copy_block()`，
+  避免 Triton `batch_memcpy_kernel`；
+- 仅在新版 `mamba_utils` 没有 `postprocess_mamba` 时安装兼容入口。
+
+修复后服务可以正常启动，MTP eager 和 MTP graph 均可接受请求。该兼容层目前仍是
+DLC 专用 fallback，尚未补 batch、多个 accepted token 和 CoW 的独立单测。
+
+#### 10.8.2 冷/热 prefix cache 结果
+
+测试条件：TP=8、`max-model-len=8192`、`gpu-memory-utilization=0.85`、
+`block-size=256`、`--enable-prefix-caching`、`--mamba-cache-mode align`、
+`--enable-mamba-shared-prefix-checkpoint`、`--no-async-scheduling`、MTP
+`num_speculative_tokens=1`。固定 4096-token 随机 prompt，greedy 输出 32 token，
+同一服务内连续发送 5 次。
+
+| 配置 | 首次 / 第二次缓存 | 第 3 次起缓存 | greedy 输出是否冷热一致 |
+|---|---:|---:|---|
+| MTP graph，`max-num-batched-tokens=4096` | 0 / 0 | 3584 | **否** |
+| MTP eager，`max-num-batched-tokens=4096` | 0 / 0 | 3584 | **否** |
+| 无 MTP eager，`max-num-batched-tokens=4096` | 0 | 3840 | **否** |
+| MTP graph，`max-num-batched-tokens=512` | 0 | 3584 | **是** |
+| MTP eager，`max-num-batched-tokens=512` | 0 | 3584 | **是** |
+
+4096-token chunk 配置中，冷请求输出为：
+
+```text
+197, 197, 322, 197, 197, 322, ...
+```
+
+第 3 次开始命中 3584 token 后输出变为：
+
+```text
+197, 197, 322, 13, 455, 6890, 198, ...
+```
+
+同样的输出翻转在无 MTP 的 eager 控制组也能复现，因此不是 MTP 独有，而是
+KDA checkpoint/prefix-cache 通用问题。512-token chunk 下，MTP eager 和 graph
+的冷、热请求输出均完全一致；缓存从第 2 次请求开始命中 3584 token。
+
+#### 10.8.3 原因与暂定处理
+
+4096-token prompt 在 `max_num_batched_tokens=4096` 时，checkpoint `3584` 位于
+最后一次 prefill chunk 内部，当前 framework fallback 会在该位置把 prefill 拆成：
+
+```text
+[0, 3584] -> checkpoint state
+[3584, 4096] -> final state
+```
+
+而冷请求执行的是完整 `[0, 4096]` prefill。两段 split 的 KDA kernel shape、FP32
+归约顺序和 state staging 路径都与完整 prefill 不同，因此不保证 checkpoint state
+与完整 prefill 的中间 state 逐 bit 一致；本次固定 prompt 恰好把微小差异放大成
+greedy token 翻转。`--enable-mamba-shared-prefix-checkpoint` 只负责注册 shared-prefix
+junction checkpoint，不能消除这个数值差异。
+
+512-token chunk 使 3584 成为 chunk 末端，避开了非末端 checkpoint 的 split
+fallback，因此冷热输出一致。该配置目前只作为打通 prefix-cache 路径的验证
+workaround，不应直接作为生产配置：它把长上下文拆成更多 prefill step，性能尚未
+在 16K/32K/64K 上实测。
+
+该问题暂不要求在 framework 层继续用数值修补掩盖，待 KDA prefill checkpoint
+原生算子落地后，以“checkpoint state 对完整 prefill snapshot 逐 bit 或 1 FP32 ULP
+一致，且 cold/hot greedy token 完全一致”作为验收条件重新验证。算子 issue 中
+当前写的 `<=2e-2` 只适合作为粗粒度数值门槛，不能单独证明 greedy 输出等价。
+
+#### 10.8.4 当前剩余问题
+
+1. **4096 chunk 非末端 checkpoint 仍会导致冷热输出翻转**：等待 KDA checkpoint
+   原生算子；512 chunk 只是临时验证路径。
+2. **512 chunk 的性能代价未测**：4096 档 cold 约 12.7 s、hot 约 3.4 s；16K/32K/64K
+   尚需测量 chunk 数增加后的 prefill/TTFT，特别是 KPool select/top-k 的长上下文成本。
+3. **4096 chunk + checkpoint flag 的 MTP graph capture 曾卡在 `0/1`**：
+   日志停在 `Capturing CUDA graphs (decode, FULL): 0/1`，随后出现
+   `No available shared memory broadcast block found` 60 s 告警；512 chunk graph
+   可正常 capture。需要单独做 checkpoint flag、graph cache 和硬件残留状态 A/B，
+   当前不能把 4096 graph 视为已打通。
+4. **第二次相同请求仍可能不命中**：4096 和 eager 测试中前两次均为 0，第三次才命中；
+   512 测试从第二次开始命中。需要确认是 request 完成后的 cache finalize 时序、
+   EAGLE/MTP lookahead block drop，还是 metrics 读取窗口问题。
+5. **缺少 512 chunk 的 no-prefix 基线**：目前只证明了 512 下 cold 与 hot 一致，
+   尚未证明它与同 chunk 配置的 no-prefix cold 输出一致。
+6. **多请求共享前缀未验证**：尚未覆盖多个请求共享 3584-token prefix、不同 suffix，
+   以及每个请求分别与 cold baseline 对照。
+7. **MTP draft cache/KPool 的 prefix reuse 未单独验证**：目标模型 KDA checkpoint
+   之外，MTP drafter 还有独立的 KV cache group；需确认其 prefix 命中、lookahead
+   block drop 和 KPool tail cache 的生命周期。
+8. **async scheduling 未进入本轮**：当前统一使用 `--no-async-scheduling`；
+   prefix-cache 路径打通后再验证 async scheduling 与 MTP graph 的组合。
+
+本轮日志与结果：
+
+- `/root/workspace/log/mtp_prefix_cache_ckpt_20261116.log`
+- `/root/workspace/log/mtp_prefix_cache_ckpt_eager_20261116.log`
+- `/root/workspace/log/prefix_cache_checkpoint_nomtp_eager_20261116.log`
+- `/root/workspace/log/mtp_prefix_cache_ckpt_512_20261116.log`
+- `/root/workspace/log/mtp_prefix_cache_ckpt_512_graph_20261116.log`
+- `work-tests/mtp/results/prefix_cache_20261116/`
+
+### 10.9 2026-11-16 复核：复位、命中时序与长上下文
+
+#### 10.9.1 4096 graph 复位复核
+
+先停止全部 vLLM 进程，执行：
+
+```bash
+cltechpd_clnt -s --full
+```
+
+随后以 4096-token chunk、MTP `num_speculative_tokens=1`、prefix cache 和
+`FULL_DECODE_ONLY` graph 启动，8 个 worker 均完成 graph capture，服务正常进入
+`Application startup complete`。上次停在 `Capturing CUDA graphs (decode, FULL): 0/1`
+的现象本次未复现，判断为硬件/驱动残留状态导致，不是 4096 graph 的稳定代码缺陷。
+
+但 `max-model-len=66560 + max-num-batched-tokens=512` 的长上下文 graph 仍有独立问题：
+
+- `max-num-seqs=1`：capture 前停在 graph memory profiling，芯片现场在
+  `custom_allreduce_2x4tpu4root_simple_bf16_rdma`；
+- `max-num-seqs=8`：graph warmup 的 `_dummy_run()` 报
+  `synErrorLaunchFailure`，芯片现场为 `custom_gather_tensor`
+  的 `bad_vld_base: Vld base out of range`。
+
+因此当前可把 4096 graph 视为可信启动路径，但不能把 512-token chunk 的长上下文
+graph 视为已打通。本轮日志：
+
+- 4096 graph 复位复核：`/root/workspace/log/mtp_prefix_cache_ckpt_after_reset_20261116.log`
+- 4096 graph 精确 4096 请求：`/root/workspace/log/mtp_prefix_4096_graph_exact_20261116.log`
+- 512 长上下文 graph 失败：`/root/workspace/log/mtp_prefix_512_longctx_graph_seq8_20261116.log`
+
+失败调用链已由 `py-spy` 和 kernel log 交叉确认：
+
+```text
+GDNAttentionMetadataBuilder.build_for_cudagraph_capture
+  -> GDNAttentionMetadataBuilder.build          # gdn_attn.py:230
+  -> mamba_get_block_table_tensor                # utils.py:1136
+  -> torch.gather(block_table, 1, indices)       # utils.py:1173
+  -> gather_dlc_kernel                          # ScatterGatherKernel.cxx
+  -> custom_gather_tensor                       # int32 input
+```
+
+`py-spy` 的 Python 栈停在 `gdn_attn.py:339` 的
+`block_table_tensor[spec_sequence_masks_cpu, : self.num_spec + 1]`，这是因为
+`custom_gather_tensor` 是异步 launch，报错可能在后续 Python 行才被观察到；kernel log
+显示真正命中 `custom_gather_tensor` 的是前一步 `mamba_get_block_table_tensor()` 的
+`torch.gather`。261 来自 `66560 / 256 + 1` 的 raw KDA block table 宽度，不是 batch
+size；helper 输出才是 `[1,2]`。
+
+instrumented 运行中，`gdn_attn.py:339` 实际拿到：
+
+```text
+block_table_tensor: shape=(1,2) stride=(2,1) storage_offset=0
+                    ptr_mod512=0 int32 values=[[0,0]]
+spec_sequence_masks_cpu: shape=(1,) cpu [True]
+query_start_loc_cpu=[0,2], num_spec=1, num_spec_decodes=1
+```
+
+同轮 kernel log 中 `custom_gather_tensor` 已完成（cycles=4837），进程随后执行到
+`custom_index_tensor_out_bf16` 并停在 graph capture；这次没有在该点复现
+`bad_vld_base`，说明问题具有异步/时序或完整 graph 状态相关成分，不是稳定的
+单 kernel 输入错误。
+
+最小复现脚本已放在 `work-tests/mtp/repro_custom_gather.py`；脚本覆盖：
+
+- `block_table[mask, :2]` 的原始 advanced indexing；
+- `torch.gather(block_table, dim=0, index=[1,2])`；
+- `torch.gather(block_table, dim=1, index=[1,2])` 的 helper 路径。
+
+复位后实际执行结果：
+
+| 测试 | 设备 | 次数 | 结果 |
+|---|---|---:|---|
+| eager `gather` / mask 三种路径 | dlc:0/1/6 单卡 | 1 | 全部通过 |
+| eager 循环 | 8 卡并发 | 1,000/卡 | 全部通过 |
+| graph capture + replay | dlc:1/6 单卡 | 100 | 全部通过 |
+| graph capture + replay | 8 卡并发 | 1,000/卡 | 全部通过 |
+
+单独的形状、dtype、mask/切片路径和循环 launch 都不能复现 `bad_vld_base`，说明
+问题不只是一个简单的 `[1,261] int32 + [1,2] int64` gather。instrumented 运行也没在
+该 gather 处重现，而是继续到后面的 `custom_index_tensor_out_bf16`；因此暂不能把
+根因归到单一 gather API，下一步应保留这份 graph-capture 现场，重点检查 gather
+之前的 kernel/VMEM 状态以及 8 rank 的异步推进差异。
+
+补充 `max-num-seqs=8` 的 instrumented 结果：
+
+```text
+raw block table: shape=(8, 261), stride=(261, 1), offset=0, 全 0
+helper output:   shape=(8, 2),   stride=(2, 1),   offset=0, 全 0
+```
+
+该轮在加入同步日志后正常到达 `Application startup complete`，没有出现
+`custom_gather_tensor` 的 `bad_vld_base`。结合以下事实：
+
+- 同一形状的 8 卡独立脚本 1000 次 eager/graph capture 全通过；
+- `max-num-seqs=1` instrumented 轮次中 gather 也完成，随后卡在
+  `custom_index_tensor_out_bf16`；
+- `max-num-seqs=8` instrumented 轮次直接启动成功；
+
+当前更倾向是完整模型 graph capture 的时序/竞态问题（日志同步改变了 launch 顺序），
+而不是 block table 数值或单个 gather 形状错误。下一步应比较“无日志跑、日志跑、
+单 rank 跑”的 kernel 时序，重点看 `custom_gather_tensor` 之前是否有未完成的
+VMEM/CMEM producer kernel 或 rank 间 collective 等待。
+
+#### 10.9.2 精确 4096 token 的命中时序
+
+此前记录的“前两次 0、第三次才命中”在精确 4096-token prompt 上稳定复现：
+
+| 配置 | 第 1 次 | 第 2 次 | 第 3 次 |
+|---|---:|---:|---:|
+| MTP graph，chunk=4096 | 0 hit，12.363 s | 0 hit，12.446 s | 3584 hit，3.536 s |
+| MTP eager，chunk=512 | 0 hit，12.988 s | 3584 hit，3.768 s | 3584 hit，3.761 s |
+
+4096 配置的 scheduler 日志显示第一次请求实际拆成 `3840 + 256`，第二次为
+`3584 + 256 + 256`，第三次只重算最后 `256 + 256`。代码级根因在
+`vllm/models/glm5next/common/kda.py::get_kv_cache_spec()`：
+
+```python
+if (
+    current_platform.device_type != "dlc"
+    or vllm_config.cache_config.mamba_cache_mode != "align"
+    or vllm_config.speculative_config is not None
+):
+    return spec
+```
+
+当前实现只在**无 speculative config**时给 KDA spec 增加
+`num_prefill_checkpoint_blocks=1` / `prefill_checkpoint_alignment=64`。MTP 打开后
+该分支直接返回原始 spec，因此第一次 4096 请求不会生成 3584 的 Mamba checkpoint；
+`--enable-mamba-shared-prefix-checkpoint` 此时只能等第二次请求从 full-attention
+的 3584 前缀发现 shared-prefix junction，再补写并保留 Mamba state，第三次才形成
+完整命中。这不是 prefix cache 的随机行为，而是 MTP 下 KDA checkpoint 尚未落地的
+已知缺口。
+
+用 `--prefix-cache-retention-interval 256` 复核后，前两次仍为 0、第三次才命中；
+临时日志显示 Mamba manager 拿到的 checkpoint 为空，说明该参数不能替代 KDA
+checkpoint 本身。因此不把它作为修复项，继续等原生 KDA checkpoint 算子。
+
+时序相关结果文件：
+
+- `work-tests/mtp/results/prefix_cache_20261116/mtp_prefix_4096_graph_exact_hit_timing_20261116.json`
+- `work-tests/mtp/results/prefix_cache_20261116/mtp_prefix_4096_retention256_20261116.json`
+- `work-tests/mtp/results/prefix_cache_20261116/mtp_prefix_512_exact4096_hit_timing_20261116.json`
+
+#### 10.9.3 512 chunk 的关键对照
+
+在 512-token chunk、MTP graph、prefix cache 开启的服务上，使用：
+
+- 4000-token 固定 prompt `P`；
+- `prefix=P[:3584]`，两个不同 4-token suffix `A`、`B`；
+- 与同 chunk、`--no-enable-prefix-caching --mamba-cache-mode none` 的服务逐项对比。
+
+结果：
+
+| 请求 | prefix-on 输出 | prefix-off 输出 | prefix-on 是否一致 |
+|---|---|---|---|
+| `P`（4000 token） | 与 prefix-off 相同 | 基准 | 是 |
+| `P[:3584]+A` 首次 | 与 prefix-off 相同 | 基准 | 是 |
+| `P[:3584]+A` 重复 | 与首次相同 | 基准 | 是 |
+| `P[:3584]+B` | 与 prefix-off 相同 | 基准 | 是 |
+
+prefix-on 的共享前缀请求第一次命中 3072 token，重复请求和同前缀不同 suffix 的
+`B` 均命中 3328 token；输出没有因命中位置不同而变化。说明 512 chunk 下
+prefix-cache 的数值路径与 no-prefix 基线一致。结果文件：
+
+- `work-tests/mtp/results/prefix_cache_20261116/mtp_prefix_512_on_20261116.json`
+- `work-tests/mtp/results/prefix_cache_20261116/mtp_prefix_512_shared_prefix_20261116.json`
+- `work-tests/mtp/results/prefix_cache_20261116/mtp_prefix_512_off_20261116.json`
+
+#### 10.9.4 512 chunk 长上下文性能（eager）
+
+长上下文 graph 启动未打通，先用同配置 eager 测 prefill 成本。配置为
+`max-model-len=66560`、`max-num-batched-tokens=512`、MTP graph 关闭、
+prefix cache 开启；每档发送同一 prompt 的冷/热两次，输出 4 token，记录流式首 token
+时间（TTFT）和总耗时：
+
+| prompt tokens | cold TTFT | cold total | hot TTFT | hot total | hot cache hit |
+|---:|---:|---:|---:|---:|---:|
+| 16,384 | 44.639 s | 45.001 s | 1.659 s | 2.002 s | 15,872 |
+| 32,768 | 93.884 s | 94.087 s | 1.847 s | 2.050 s | 32,256 |
+| 65,536 | 202.453 s | 202.638 s | 2.221 s | 2.417 s | 65,024 |
+
+冷请求耗时随长度近似线性；热请求只重算尾部 512 token，TTFT 约 1.7–2.2 s。该表是
+512 chunk workaround 的 prefill 量级数据，不是正式 SLA，也不包含长上下文 graph
+decode 收益。结果文件：
+
+- `work-tests/mtp/results/prefix_cache_20261116/mtp_prefix_512_longctx_eager_20261116.json`
+
+#### 10.9.5 当前处理结论
+
+1. 4096 graph 卡住已按硬件复位关闭；4096 graph 精确请求仍保留“两次预热、第三次
+   命中 3584”的行为，等待 KDA checkpoint 算子消除。
+2. 512 chunk 的 prefix-on/off 和共享前缀关键对照通过，单请求输出一致。
+3. 命中时序已定位到 MTP 下 KDA spec 不启用 `num_prefill_checkpoint_blocks`，
+   以及 shared-prefix junction 需要 sibling 请求才能发现。
+4. 512 chunk 长上下文 eager 性能已测；512 chunk 长上下文 graph 仍有两个独立
+   启动问题，需后续单独定位。
+
+2026-11-17 补充：已合并并验证 KDA chunk-prefill checkpoint 远端实现
+（kernel `7894c5129`、pytorch `ec181b5ff5`）。`dlc_kda_chunk_prefill` 的 checkpoint
+功能通过静态/动态/syntest 和 4K/64K 补充验证；但
+`dlc_kda_causal_conv_prefill` 仍没有 checkpoint API，完整 KDA checkpoint issue
+尚未全部满足。详细报告见
+`work-docs/glm53flash/KDA_prefill_checkpoint_operator_validation_2026-11-17.md`。
+
