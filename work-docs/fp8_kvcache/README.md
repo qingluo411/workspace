@@ -6,6 +6,7 @@
 - [宣讲HTML](vllm-cl/presentation.html)、[PDF](vllm-cl/presentation.pdf)：此前评审与宣讲归档。
 - [原始KV cache设计](vllm-cl/design.md)、[原始数值与布局契约](vllm-cl/kernel_numerics_and_layout.md)：早期固定per-layer scale、D128/P256方案，属于历史预研，不能当作最新group128/group32算子需求。
 - [GLM-5.3 Sparse MLA FP8 实施契约](vllm-cl/glm53_sparse_mla_fp8_plan_20261027.md)：按当前 `main` 的 group128/FP32-scale ABI、GLM `D=512/NoPE/P256` 与 DLC 一字节布局更新，是后续接入的主设计入口。
+- [vLLM v0.30.1 FP8 KV cache 适配方案](vllm-cl/v0.30.1_adaptation_plan_20261117.md)：对照旧 `fp8-kvcache-main` 原型与 v0.30.1 的 `KVQuantMode`/`customize_spec`/allocator 变化，给出 GQA FP8 的落地步骤与边界。
 - [FP8 KV Cache 使用参考](fp8_kv_cache_usage_reference.md)：分离 FP8 values + flat FP32 scales 的 API、容量公式、真机实测、反例和当前限制。
 - [Qwen3 低利用率容量与精度验收](qwen3_fp8_kvcache_lowutil_validation_20261027.md)：TP4、同显存上限下 FP8/BF16 的 block 容量、短请求和 8192-token 精度对照。
 - [历史临时接口测试说明](legacy_g128_test_guide.md)：从kernel仓README提取，命令已更新到归档位置。
