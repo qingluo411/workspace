@@ -1,6 +1,8 @@
 # GLM-5.3-Flash 模型服务使用指南（2026-10-23）
 
 > 2026-11-13 更新：新增 MTP + `FULL_DECODE_ONLY` graph 的验证/灰度启动说明（3.6）。
+> 2026-11-18 更新：补充 `--enable-prompt-tokens-details`，用于观测 prefix cache 的
+> `usage.prompt_tokens_details.cached_tokens`。
 
 ## 1. 交付内容
 
@@ -73,6 +75,10 @@ vllm serve /data/models/GLM-5.3-Flash-Mix \
   --kernel-config '{"enable_jit_warmup": false}'
 ```
 
+如需验证 prefix cache 命中并读取每次请求的缓存 token 数，在启动命令中追加
+`--enable-prompt-tokens-details`。该开关只增加响应中的统计字段，不改变缓存或计算
+路径；使用仓库启动脚本时可写 `--prompt-token-details`。具体响应见 5.6。
+
 ### 3.2 参数说明
 
 | 参数                         | 取值                                      | 用法与注意事项                                                                                                                                                          |
@@ -92,6 +98,7 @@ vllm serve /data/models/GLM-5.3-Flash-Mix \
 | `--compilation-config`     | `{"cudagraph_mode":"FULL_DECODE_ONLY"}` | 只捕获 uniform decode graph，prefill 和 chunked prefill 保持 eager；不要切换为完整 graph。                                                                              |
 | `--kernel-config`          | `{"enable_jit_warmup": false}`          | 关闭 JIT warmup，使用发布时已编译并验证的 AOT kernel。                                                                                                                  |
 | `--enforce-eager`          | 开关                                      | 关闭 graph capture，所有阶段走 eager；仅用于精度排查、问题复现或性能对照，不作为生产默认值。                                                                            |
+| `--enable-prompt-tokens-details` | 开关                                 | 在 OpenAI completion/chat 响应的 `usage.prompt_tokens_details.cached_tokens` 中返回本次请求命中的前缀 token 数。默认关闭；只影响响应字段，不改变 prefix-cache 的启用或计算。启动脚本对应开关为 `--prompt-token-details`。 |
 
 环境变量说明：
 
@@ -103,6 +110,7 @@ vllm serve /data/models/GLM-5.3-Flash-Mix \
 | `VLLM_USE_DLC_COL_MAJOR_MATMUL` | `1`                        | 使用适配 checkpoint 的 DLC column-major linear 路径。                                                                                                               |
 | `PYTORCH_DLC_ALLOC_CONF`        | `expandable_segments:True` | 缓解 Mamba state 与 MLA tensor 交错分配造成的显存碎片。                                                                                                             |
 | `VLLM_LOGGING_LEVEL`            | `INFO`                     | 避免开发 shell 的 DEBUG 日志放大；排障时可临时改为 `DEBUG`。                                                                                                      |
+| `GLM5_PROMPT_TOKEN_DETAILS`     | `0`                        | 设为 `1` 时启动脚本自动追加 `--enable-prompt-tokens-details`；也可在命令行使用 `--prompt-token-details`。默认关闭。                                                |
 
 冷启动约 3–4 分钟：权重加载约 110 s，KV/profile/graph 初始化约 43 s。启动期间不要重复拉起第二个实例。
 
@@ -461,6 +469,47 @@ curl -sS http://127.0.0.1:18005/tokenize \
 
 Chat Completions 的 `prompt_tokens` 包含 chat template 增加的控制 token，通常比原始文本估算略大。
 
+### 5.6 Prefix-cache 命中观测
+
+`cached_tokens` 需要服务端显式开启 `--enable-prompt-tokens-details` 才会出现在
+响应中。使用启动脚本时可以直接传：
+
+```bash
+bash start_glm5_flash_vllm_cl.sh \
+  --eager \
+  --enable-prefix-caching \
+  --mamba-cache-mode align \
+  --prompt-token-details \
+  ...
+```
+
+对应的直接 `vllm serve` 参数为：
+
+```text
+--enable-prompt-tokens-details
+```
+
+开启后，非流式 completion 的 `usage` 会形如：
+
+```json
+{
+  "prompt_tokens": 4096,
+  "completion_tokens": 32,
+  "prompt_tokens_details": {
+    "cached_tokens": 3584
+  }
+}
+```
+
+读取时注意：
+
+- 第一次请求没有可复用前缀，`cached_tokens` 通常为 `0`，不是缓存故障。
+- 后续相同前缀请求才可能返回非零值；实际值受 `--block-size 256`、KDA checkpoint
+  边界和多组 KV cache 命中归约影响，可能小于 prompt 总长度。
+- `cached_tokens` 只用于观测和验收；关闭该参数时字段为 `null` 或不出现，不代表
+  prefix cache 未命中，仍应结合请求耗时和服务端 `Prefix cache hit rate` 判断。
+- 该参数不控制 `--enable-prefix-caching`；两者需要分别配置。
+
 ## 6. 日志与诊断
 
 ### 6.1 服务日志
@@ -601,12 +650,13 @@ vllm bench serve \
   --model GLM-5.3-Flash-Mix \
   --tokenizer /data/models/GLM-5.3-Flash-Mix \
   --dataset-name random \
-  --random-input-len 512 \
-  --random-output-len 64 \
-  --num-prompts 16 \
-  --max-concurrency 8 \
+  --random-input-len 32000 \
+  --random-output-len 512 \
+  --num-prompts 1 \
+  --max-concurrency 1 \
   --ignore-eos \
   --temperature 0 \
+  --seed 1234 \
   --save-result \
   --result-dir /root/workspace/work-docs/glm53flash/vllm-cl/docs/glm5_flash/bench_results
 ```

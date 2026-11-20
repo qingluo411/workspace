@@ -1,12 +1,19 @@
 # GLM-5.3-Flash 融合算子需求（Issue 草稿）
 
 本目录保存 GLM-5.3-Flash 在 DLC 上从「纯 PyTorch native 组合实现」迁移到「融合算子」的
-算子需求 issue 草稿，共 **18 个**，按 `docs/glm5_flash/op_request.yml` 的 Issue Form 字段顺序编写。
+算子需求 issue 草稿；当前包含 **#01–#21** 及若干合并/修复说明，按
+`docs/glm5_flash/op_request.yml` 的 Issue Form 字段顺序编写。
 
 > **2026-11-13 追加（MTP）**：新增 **#20 `dlc_fused_eh_norm_bf16`**（P1）。
 > 这是目前唯一确认的 MTP 专属融合算子：当前 `fused_eh_norm_dlc` 是 mask + 两次
 > RMSNorm + cat 的 Python fallback，`T=4/H=4096` 约 0.58 ms。详见
 > [`20_dlc_fused_eh_norm.md`](20_dlc_fused_eh_norm.md)。
+
+> **2026-11-19 追加（算子精度）**：新增 **#21
+> `dlc_fused_moe_w4a16_deterministic_expert_reduce`**（P0）。W4A16 fused MoE
+> 原先按当前 active expert 数动态划分两个 XYS；总 token 数变化会移动分核边界，
+> 导致同一行输入的 FP32 CMEM 累加分组/顺序变化并产生 BF16 ULP 差异。
+> 详见 [`21_dlc_fused_moe_w4a16_deterministic_expert_reduce.md`](21_dlc_fused_moe_w4a16_deterministic_expert_reduce.md)。
 
 ## 背景
 

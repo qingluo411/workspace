@@ -101,7 +101,7 @@ def main() -> int:
     report["all_ok"] = all_ok
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\\n")
+        args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     print(f"all_ok={all_ok}", flush=True)
     return 0 if all_ok else 1
 

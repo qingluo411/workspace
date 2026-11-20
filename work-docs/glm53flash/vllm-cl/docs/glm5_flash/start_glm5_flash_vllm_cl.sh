@@ -5,7 +5,7 @@ set -euo pipefail
 # Decode graph capture is the default (FULL_DECODE_ONLY); prefill and chunked
 # prefill stay eager.  Use `--eager` only for triage or output comparisons.
 #
-# Optional profiling switches (everything else is forwarded to `vllm serve`):
+# Optional launcher switches (everything else is forwarded to `vllm serve`):
 #   --graph                accepted for compatibility (graph is already default)
 #   --eager                disable graph capture (--enforce-eager)
 #   --profile              enable the vLLM torch profiler on the server
@@ -13,6 +13,9 @@ set -euo pipefail
 #   --kernel-log           write the Synapse per-launch kernel log (tensor
 #                          shapes/strides/dtypes/scalars + device cycles)
 #   --kernel-log=<dir>     same, with an explicit output directory
+#   --prompt-token-details forward --enable-prompt-tokens-details so OpenAI
+#                          responses include usage.prompt_tokens_details.cached_tokens
+#                          (opt-in; useful for prefix-cache hit validation)
 #
 # `--kernel-log` exports DLC_SYN_LOG_DIR / DLC_SYN_VERBOSE=1 / DLC_SYN_DEBUG=1
 # / DLC_SYN_PROF_CYCLE=1; each process then writes <prefix>_<pid>.ansi holding
@@ -70,6 +73,13 @@ export DLC_SKIP_VERSION_CHECK="${DLC_SKIP_VERSION_CHECK:-0}"
 # set DLC_SYN_GRAPH_CACHE=0 only for cache-specific triage.
 export DLC_SYN_GRAPH_CACHE="${DLC_SYN_GRAPH_CACHE:-1}"
 
+# DLC graph capture can race with non-blocking CPU->device metadata copies
+# (notably query_start_loc in MTP draft metadata). Use the PyTorch DLC
+# async-copy level switch to make H2D synchronous in the service.
+# O0=synchronous, O3=default async; see
+# pytorch/c10/dlc/DLCConstants.h.
+export DLC_SYN_COPY_ASYNC="${DLC_SYN_COPY_ASYNC:-O0}"
+
 # Load the DLC platform plugin and its general patch hook.  The allowlist must
 # include both names: `dlc` selects the platform and `dlc_patches` installs
 # vllm-cl's model/KV-cache patches in the API, engine-core, and worker
@@ -82,6 +92,7 @@ PROFILER_DIR="${GLM5_PROFILER_DIR:-/tmp/syn_log}"
 KERNEL_LOG="${GLM5_KERNEL_LOG:-0}"
 SYN_LOG_DIR="${GLM5_SYN_LOG_DIR:-/root/workspace/log/syn_log}"
 GRAPH="${GLM5_GRAPH:-1}"
+PROMPT_TOKEN_DETAILS="${GLM5_PROMPT_TOKEN_DETAILS:-0}"
 SERVE_ARGS=()
 for arg in "$@"; do
   case "$arg" in
@@ -91,9 +102,17 @@ for arg in "$@"; do
     --profile=*) PROFILE=1; PROFILER_DIR="${arg#--profile=}" ;;
     --kernel-log) KERNEL_LOG=1 ;;
     --kernel-log=*) KERNEL_LOG=1; SYN_LOG_DIR="${arg#--kernel-log=}" ;;
+    --prompt-token-details|--enable-prompt-tokens-details) PROMPT_TOKEN_DETAILS=1 ;;
     *) SERVE_ARGS+=("$arg") ;;
   esac
 done
+
+case "$PROMPT_TOKEN_DETAILS" in
+  1|true|True|TRUE|on|ON|yes|YES)
+    SERVE_ARGS+=(--enable-prompt-tokens-details)
+    echo "[metrics] prompt token details enabled; usage.prompt_tokens_details.cached_tokens will be populated" >&2
+    ;;
+esac
 
 case "$GRAPH" in
   1|true|True|TRUE|on|ON|yes|YES) GRAPH=1 ;;
