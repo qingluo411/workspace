@@ -27,6 +27,12 @@ vLLM / vllm-cl 推理服务插件。
 | `DLC_CL` | `main` | `bc878f8` | DLCCL |
 | `LLVM` | `main` | `cecb029aa019` | DLC 编译工具链；RT ABI 3.2.0 |
 
+## 内部工程仓库引用
+
+根仓库不把组件仓库作为 Git submodule，也不固定任何 commit。各仓库保持独立 Git
+历史；路径、remote 和职责统一记录在 [`repos.yaml`](repos.yaml) 中。该文件只提供
+仓库引用，不包含 revision/branch pin。
+
 `DLCsim` 已退出当前构建和运行链，只保留源码仓库与旧安装目录
 `/usr/local/chipltech/simulator.dlcsim-1b0504e2-20261111-092140` 作为回滚参考；
 当前模拟器及 CRT 由 `CLsim` 提供。

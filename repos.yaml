@@ -1,0 +1,60 @@
+# Internal engineering repositories used by this workspace.
+#
+# This file is a reference manifest only.  The repositories remain independent
+# Git repositories; no commit or branch revision is pinned here.
+
+repositories:
+  - name: LLVM
+    path: LLVM
+    remote: git@github.com:ChipLTech/LLVM.git
+    role: DLC/TYD compiler backend and assembler toolchain
+
+  - name: CLsim
+    path: CLsim
+    remote: git@github.com:ChipLTech/CLsim.git
+    role: Instruction simulator and CRT firmware for DLC/TYD
+
+  - name: DLCsim
+    path: DLCsim
+    remote: git@github.com:ChipLTech/DLCsim.git
+    role: Legacy simulator retained for rollback only
+
+  - name: DLCSynapse
+    path: DLCSynapse
+    remote: git@github.com:ChipLTech/DLCSynapse.git
+    role: Synapse runtime, Graph, memory, profiler and userspace driver
+
+  - name: DLC_Custom_Kernel
+    path: DLC_Custom_Kernel
+    remote: git@github.com:ChipLTech/DLC_Custom_Kernel.git
+    role: AOT custom-kernel library and kernel metadata
+
+  - name: DLC_CL
+    path: DLC_CL
+    remote: git@github.com:ChipLTech/DLC_CL.git
+    role: DLCCL collective-communication library
+
+  - name: pytorch
+    path: pytorch
+    remote: git@github.com:ChipLTech/pytorch.git
+    role: PyTorch fork providing the DLC device backend
+
+  - name: vllm
+    path: vllm
+    remote: git@github.com:ChipLTech/vllm.git
+    role: DLC vLLM fork
+
+  - name: vllm-cl
+    path: vllm-cl
+    remote: git@github.com:ChipLTech/vllm-cl.git
+    role: vLLM DLC hardware plugin and model patches
+
+  - name: torchaudio
+    path: torchaudio-2.5
+    remote: git@github.com:ChipLTech/torchaudio.git
+    role: DLC-compatible torchaudio media dependency
+
+  - name: torchvision
+    path: torchvision
+    remote: git@github.com:ChipLTech/torchvision.git
+    role: DLC-compatible torchvision media dependency
